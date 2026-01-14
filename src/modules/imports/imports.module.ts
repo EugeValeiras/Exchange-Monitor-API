@@ -6,12 +6,14 @@ import {
   Transaction,
   TransactionSchema,
 } from '../transactions/schemas/transaction.schema';
+import { ExchangeCredentialsModule } from '../exchange-credentials/exchange-credentials.module';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Transaction.name, schema: TransactionSchema },
     ]),
+    ExchangeCredentialsModule,
   ],
   controllers: [ImportsController],
   providers: [ImportsService],

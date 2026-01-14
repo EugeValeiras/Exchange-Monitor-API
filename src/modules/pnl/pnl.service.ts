@@ -1,6 +1,7 @@
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import * as ExcelJS from 'exceljs';
 import {
   CostBasisLot,
   CostBasisLotDocument,
@@ -42,18 +43,29 @@ export class PnlService {
 
     // Determine if this adds to cost basis or realizes gains
     if (this.isAcquisition(tx)) {
+      // Get price - use transaction price if available, otherwise fetch historical
+      let pricePerUnit = tx.price;
+      if (!pricePerUnit || pricePerUnit === 0) {
+        pricePerUnit = await this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
+      }
+
       await this.addLot(
         userId,
         tx.asset,
         tx.amount,
-        tx.price || 0,
+        pricePerUnit,
         tx.timestamp,
         tx._id.toString(),
         tx.exchange,
         tx.type,
       );
     } else if (this.isDisposal(tx)) {
-      const pricePerUnit = tx.price || 0;
+      // Get price - use transaction price if available, otherwise fetch historical
+      let pricePerUnit = tx.price;
+      if (!pricePerUnit || pricePerUnit === 0) {
+        pricePerUnit = await this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
+      }
+
       await this.consumeLotsFIFO(
         userId,
         tx.asset,
@@ -63,6 +75,37 @@ export class PnlService {
         tx._id.toString(),
         tx.exchange,
       );
+    }
+  }
+
+  /**
+   * Get historical price for an asset at a specific date
+   * Uses cached prices when available, falls back to API
+   */
+  private async getHistoricalPriceForTransaction(
+    asset: string,
+    date: Date,
+  ): Promise<number> {
+    try {
+      const pricesMap = await this.pricesService.getHistoricalPricesMap([asset], date);
+      const price = pricesMap[asset] || 0;
+
+      if (price > 0) {
+        this.logger.debug(
+          `Historical price for ${asset} on ${date.toISOString().split('T')[0]}: $${price}`,
+        );
+      } else {
+        this.logger.warn(
+          `Could not find historical price for ${asset} on ${date.toISOString().split('T')[0]}`,
+        );
+      }
+
+      return price;
+    } catch (error) {
+      this.logger.warn(
+        `Error fetching historical price for ${asset}: ${error.message}`,
+      );
+      return 0;
     }
   }
 
@@ -274,6 +317,256 @@ export class PnlService {
     this.logger.log(`P&L recalculation complete. Processed ${processed}/${transactions.length} transactions`);
 
     return { processed };
+  }
+
+  /**
+   * Export P&L data to Excel for verification
+   */
+  async exportToExcel(userId: string): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Exchange Monitor';
+    workbook.created = new Date();
+
+    // Sheet 1: Cost Basis Lots (Acquisitions)
+    const lotsSheet = workbook.addWorksheet('Cost Basis Lots');
+    lotsSheet.columns = [
+      { header: 'Asset', key: 'asset', width: 12 },
+      { header: 'Exchange', key: 'exchange', width: 15 },
+      { header: 'Source', key: 'source', width: 12 },
+      { header: 'Acquired At', key: 'acquiredAt', width: 20 },
+      { header: 'Original Amount', key: 'originalAmount', width: 18 },
+      { header: 'Remaining Amount', key: 'remainingAmount', width: 18 },
+      { header: 'Cost Per Unit (USD)', key: 'costPerUnit', width: 20 },
+      { header: 'Total Cost Basis (USD)', key: 'totalCost', width: 22 },
+    ];
+
+    // Style header row
+    lotsSheet.getRow(1).font = { bold: true };
+    lotsSheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF4472C4' },
+    };
+    lotsSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+    const lots = await this.costBasisLotModel
+      .find({ userId: new Types.ObjectId(userId) })
+      .sort({ acquiredAt: 1 });
+
+    for (const lot of lots) {
+      lotsSheet.addRow({
+        asset: lot.asset,
+        exchange: lot.exchange,
+        source: lot.source,
+        acquiredAt: lot.acquiredAt.toISOString(),
+        originalAmount: lot.originalAmount,
+        remainingAmount: lot.remainingAmount,
+        costPerUnit: lot.costPerUnit,
+        totalCost: lot.originalAmount * lot.costPerUnit,
+      });
+    }
+
+    // Sheet 2: Realized P&L (Disposals)
+    const realizedSheet = workbook.addWorksheet('Realized P&L');
+    realizedSheet.columns = [
+      { header: 'Asset', key: 'asset', width: 12 },
+      { header: 'Exchange', key: 'exchange', width: 15 },
+      { header: 'Realized At', key: 'realizedAt', width: 20 },
+      { header: 'Amount Sold', key: 'amount', width: 15 },
+      { header: 'Proceeds (USD)', key: 'proceeds', width: 18 },
+      { header: 'Cost Basis (USD)', key: 'costBasis', width: 18 },
+      { header: 'Realized P&L (USD)', key: 'realizedPnl', width: 20 },
+      { header: 'Holding Period', key: 'holdingPeriod', width: 15 },
+      { header: 'Lots Used', key: 'lotsUsed', width: 50 },
+    ];
+
+    realizedSheet.getRow(1).font = { bold: true };
+    realizedSheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF70AD47' },
+    };
+    realizedSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+    const realizedRecords = await this.realizedPnlModel
+      .find({ userId: new Types.ObjectId(userId) })
+      .sort({ realizedAt: 1 });
+
+    for (const record of realizedRecords) {
+      const lotsInfo = record.lotBreakdown
+        .map(
+          (lb) =>
+            `${lb.amount.toFixed(8)} @ $${lb.costPerUnit.toFixed(2)} (${new Date(lb.acquiredAt).toLocaleDateString()})`,
+        )
+        .join('; ');
+
+      const row = realizedSheet.addRow({
+        asset: record.asset,
+        exchange: record.exchange,
+        realizedAt: record.realizedAt.toISOString(),
+        amount: record.amount,
+        proceeds: record.proceeds,
+        costBasis: record.costBasis,
+        realizedPnl: record.realizedPnl,
+        holdingPeriod: record.holdingPeriod,
+        lotsUsed: lotsInfo,
+      });
+
+      // Color P&L cell based on positive/negative
+      const pnlCell = row.getCell('realizedPnl');
+      if (record.realizedPnl >= 0) {
+        pnlCell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFC6EFCE' },
+        };
+        pnlCell.font = { color: { argb: 'FF006100' } };
+      } else {
+        pnlCell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFC7CE' },
+        };
+        pnlCell.font = { color: { argb: 'FF9C0006' } };
+      }
+    }
+
+    // Sheet 3: Summary by Asset
+    const summarySheet = workbook.addWorksheet('Summary by Asset');
+    summarySheet.columns = [
+      { header: 'Asset', key: 'asset', width: 12 },
+      { header: 'Total Acquired', key: 'totalAcquired', width: 18 },
+      { header: 'Total Cost Basis (USD)', key: 'totalCostBasis', width: 22 },
+      { header: 'Total Sold', key: 'totalSold', width: 18 },
+      { header: 'Total Proceeds (USD)', key: 'totalProceeds', width: 22 },
+      { header: 'Realized P&L (USD)', key: 'realizedPnl', width: 20 },
+      { header: 'Remaining Holdings', key: 'remaining', width: 18 },
+      { header: 'Remaining Cost Basis (USD)', key: 'remainingCostBasis', width: 25 },
+    ];
+
+    summarySheet.getRow(1).font = { bold: true };
+    summarySheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFFC000' },
+    };
+    summarySheet.getRow(1).font = { bold: true, color: { argb: 'FF000000' } };
+
+    // Aggregate data by asset
+    const assetSummary = new Map<
+      string,
+      {
+        totalAcquired: number;
+        totalCostBasis: number;
+        totalSold: number;
+        totalProceeds: number;
+        realizedPnl: number;
+        remaining: number;
+        remainingCostBasis: number;
+      }
+    >();
+
+    for (const lot of lots) {
+      const existing = assetSummary.get(lot.asset) || {
+        totalAcquired: 0,
+        totalCostBasis: 0,
+        totalSold: 0,
+        totalProceeds: 0,
+        realizedPnl: 0,
+        remaining: 0,
+        remainingCostBasis: 0,
+      };
+      existing.totalAcquired += lot.originalAmount;
+      existing.totalCostBasis += lot.originalAmount * lot.costPerUnit;
+      existing.remaining += lot.remainingAmount;
+      existing.remainingCostBasis += lot.remainingAmount * lot.costPerUnit;
+      assetSummary.set(lot.asset, existing);
+    }
+
+    for (const record of realizedRecords) {
+      const existing = assetSummary.get(record.asset) || {
+        totalAcquired: 0,
+        totalCostBasis: 0,
+        totalSold: 0,
+        totalProceeds: 0,
+        realizedPnl: 0,
+        remaining: 0,
+        remainingCostBasis: 0,
+      };
+      existing.totalSold += record.amount;
+      existing.totalProceeds += record.proceeds;
+      existing.realizedPnl += record.realizedPnl;
+      assetSummary.set(record.asset, existing);
+    }
+
+    for (const [asset, data] of assetSummary.entries()) {
+      const row = summarySheet.addRow({
+        asset,
+        totalAcquired: data.totalAcquired,
+        totalCostBasis: data.totalCostBasis,
+        totalSold: data.totalSold,
+        totalProceeds: data.totalProceeds,
+        realizedPnl: data.realizedPnl,
+        remaining: data.remaining,
+        remainingCostBasis: data.remainingCostBasis,
+      });
+
+      // Color P&L cell
+      const pnlCell = row.getCell('realizedPnl');
+      if (data.realizedPnl >= 0) {
+        pnlCell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFC6EFCE' },
+        };
+        pnlCell.font = { color: { argb: 'FF006100' } };
+      } else {
+        pnlCell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFC7CE' },
+        };
+        pnlCell.font = { color: { argb: 'FF9C0006' } };
+      }
+    }
+
+    // Add totals row
+    const totalRealizedPnl = Array.from(assetSummary.values()).reduce(
+      (sum, d) => sum + d.realizedPnl,
+      0,
+    );
+    const totalCostBasis = Array.from(assetSummary.values()).reduce(
+      (sum, d) => sum + d.totalCostBasis,
+      0,
+    );
+    const totalProceeds = Array.from(assetSummary.values()).reduce(
+      (sum, d) => sum + d.totalProceeds,
+      0,
+    );
+
+    const totalsRow = summarySheet.addRow({
+      asset: 'TOTAL',
+      totalAcquired: '',
+      totalCostBasis,
+      totalSold: '',
+      totalProceeds,
+      realizedPnl: totalRealizedPnl,
+      remaining: '',
+      remainingCostBasis: Array.from(assetSummary.values()).reduce(
+        (sum, d) => sum + d.remainingCostBasis,
+        0,
+      ),
+    });
+    totalsRow.font = { bold: true };
+    totalsRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE2EFDA' },
+    };
+
+    // Generate buffer
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
   }
 
   // ==================== PRIVATE METHODS ====================

@@ -9,6 +9,7 @@ import { TransactionsService } from '../transactions/transactions.service';
 import { IBalance, IExchangeAdapter } from '../../common/interfaces/exchange-adapter.interface';
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { NexoManualTransaction } from '../../integrations/exchanges/nexo-manual/nexo-manual.adapter';
+import { BinanceManualTransaction } from '../../integrations/exchanges/binance-manual/binance-manual.adapter';
 import {
   AssetBalanceDto,
   ExchangeBalanceDto,
@@ -201,6 +202,22 @@ export class BalancesService {
             }));
           };
           adapter = this.exchangeFactory.createNexoManualAdapter(fetchTransactions);
+        } else if (credential.exchange === ExchangeType.BINANCE_MANUAL) {
+          // Create a transactions fetcher for BINANCE_MANUAL
+          const fetchTransactions = async (): Promise<BinanceManualTransaction[]> => {
+            const transactions = await this.transactionsService.findByCredential(
+              credential._id.toString(),
+              credential.userId.toString(),
+            );
+            return transactions.map((tx) => ({
+              type: tx.type,
+              asset: tx.asset,
+              amount: tx.rawData?.change !== undefined
+                ? (tx.rawData.change as number)
+                : (tx.type === 'withdrawal' || tx.type === 'fee' ? -tx.amount : tx.amount),
+            }));
+          };
+          adapter = this.exchangeFactory.createBinanceManualAdapter(fetchTransactions);
         } else {
           const decrypted = this.credentialsService.getDecryptedCredentials(credential);
           adapter = this.exchangeFactory.createAdapter(
@@ -379,6 +396,21 @@ export class BalancesService {
         }));
       };
       adapter = this.exchangeFactory.createNexoManualAdapter(fetchTransactions);
+    } else if (credential.exchange === ExchangeType.BINANCE_MANUAL) {
+      const fetchTransactions = async (): Promise<BinanceManualTransaction[]> => {
+        const transactions = await this.transactionsService.findByCredential(
+          credential._id.toString(),
+          userId,
+        );
+        return transactions.map((tx) => ({
+          type: tx.type,
+          asset: tx.asset,
+          amount: tx.rawData?.change !== undefined
+            ? (tx.rawData.change as number)
+            : (tx.type === 'withdrawal' || tx.type === 'fee' ? -tx.amount : tx.amount),
+        }));
+      };
+      adapter = this.exchangeFactory.createBinanceManualAdapter(fetchTransactions);
     } else {
       const decrypted = this.credentialsService.getDecryptedCredentials(credential);
       adapter = this.exchangeFactory.createAdapter(

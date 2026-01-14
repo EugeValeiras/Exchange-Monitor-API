@@ -1,10 +1,12 @@
-import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
   ApiQuery,
+  ApiProduces,
 } from '@nestjs/swagger';
 import { PnlService } from './pnl.service';
 import {
@@ -66,5 +68,32 @@ export class PnlController {
       processed: result.processed,
       message: `P&L recalculation complete. Processed ${result.processed} transactions.`,
     };
+  }
+
+  @Get('export')
+  @ApiOperation({
+    summary: 'Export P&L data to Excel',
+    description:
+      'Generates an Excel file with cost basis lots, realized P&L, and summary by asset for verification.',
+  })
+  @ApiProduces('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @ApiResponse({
+    status: 200,
+    description: 'Excel file with P&L data',
+  })
+  async exportToExcel(
+    @CurrentUser('userId') userId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const buffer = await this.pnlService.exportToExcel(userId);
+
+    const filename = `pnl-export-${new Date().toISOString().split('T')[0]}.xlsx`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buffer);
   }
 }

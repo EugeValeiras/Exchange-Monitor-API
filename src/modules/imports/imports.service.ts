@@ -1,12 +1,14 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import * as ExcelJS from 'exceljs';
 import {
   Transaction,
   TransactionDocument,
 } from '../transactions/schemas/transaction.schema';
 import { TransactionType } from '../../common/constants/transaction-types.constant';
 import { ImportResultDto } from './dto/import-result.dto';
+import { ExchangeCredentialsService } from '../exchange-credentials/exchange-credentials.service';
 
 interface NexoCsvRow {
   Transaction: string;
@@ -22,6 +24,37 @@ interface NexoCsvRow {
   'Date / Time (UTC)': string;
 }
 
+interface BinanceTransactionRow {
+  userId: string;
+  time: string;
+  account: string;
+  operation: string;
+  coin: string;
+  change: number;
+  remark: string;
+}
+
+interface BinanceDepositRow {
+  time: string;
+  coin: string;
+  network: string;
+  amount: number;
+  address: string;
+  txid: string;
+  status: string;
+}
+
+interface BinanceWithdrawRow {
+  time: string;
+  coin: string;
+  network: string;
+  amount: number;
+  fee: number;
+  address: string;
+  txid: string;
+  status: string;
+}
+
 @Injectable()
 export class ImportsService {
   private readonly logger = new Logger(ImportsService.name);
@@ -29,7 +62,19 @@ export class ImportsService {
   constructor(
     @InjectModel(Transaction.name)
     private transactionModel: Model<TransactionDocument>,
+    private readonly credentialsService: ExchangeCredentialsService,
   ) {}
+
+  /**
+   * Get the exchange name from a credential, or throw if not found
+   */
+  private async getCredentialExchange(credentialId: string, userId: string): Promise<string> {
+    const credential = await this.credentialsService.findById(credentialId, userId);
+    if (!credential) {
+      throw new NotFoundException(`Credential ${credentialId} not found`);
+    }
+    return credential.exchange;
+  }
 
   async importNexoCsv(
     fileBuffer: Buffer,
@@ -246,5 +291,393 @@ export class ImportsService {
     // Default to transfer for unknown types
     this.logger.warn(`Unknown Nexo transaction type: ${type}`);
     return TransactionType.TRANSFER;
+  }
+
+  // ==================== BINANCE EXCEL IMPORTS ====================
+
+  /**
+   * Import Binance deposits from Excel file
+   */
+  async importBinanceDeposits(
+    fileBuffer: Buffer,
+    credentialId: string,
+    userId: string,
+  ): Promise<ImportResultDto> {
+    // Get the exchange from the credential
+    const exchange = await this.getCredentialExchange(credentialId, userId);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(fileBuffer as unknown as ExcelJS.Buffer);
+
+    const sheet = workbook.worksheets[0];
+    const records = this.parseBinanceDepositRows(sheet);
+
+    if (records.length === 0) {
+      throw new BadRequestException('No valid deposit records found in Excel file');
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const record of records) {
+      try {
+        const externalId = `binance-deposit-${record.txid || record.time}`;
+
+        const existing = await this.transactionModel.findOne({
+          externalId,
+          credentialId: new Types.ObjectId(credentialId),
+        });
+
+        if (existing) {
+          skipped++;
+        } else {
+          await this.transactionModel.create({
+            userId: new Types.ObjectId(userId),
+            credentialId: new Types.ObjectId(credentialId),
+            exchange,
+            externalId,
+            type: TransactionType.DEPOSIT,
+            asset: record.coin,
+            amount: record.amount,
+            timestamp: this.parseBinanceDate(record.time),
+            rawData: record as unknown as Record<string, unknown>,
+          });
+          imported++;
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to import deposit: ${error.message}`);
+        errors++;
+      }
+    }
+
+    this.logger.log(
+      `Binance deposits import: ${imported} imported, ${skipped} skipped, ${errors} errors`,
+    );
+
+    return { imported, skipped, errors };
+  }
+
+  /**
+   * Import Binance withdrawals from Excel file
+   */
+  async importBinanceWithdrawals(
+    fileBuffer: Buffer,
+    credentialId: string,
+    userId: string,
+  ): Promise<ImportResultDto> {
+    // Get the exchange from the credential
+    const exchange = await this.getCredentialExchange(credentialId, userId);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(fileBuffer as unknown as ExcelJS.Buffer);
+
+    const sheet = workbook.worksheets[0];
+    const records = this.parseBinanceWithdrawRows(sheet);
+
+    if (records.length === 0) {
+      throw new BadRequestException('No valid withdrawal records found in Excel file');
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const record of records) {
+      try {
+        const externalId = `binance-withdraw-${record.txid || record.time}`;
+
+        const existing = await this.transactionModel.findOne({
+          externalId,
+          credentialId: new Types.ObjectId(credentialId),
+        });
+
+        if (existing) {
+          skipped++;
+        } else {
+          await this.transactionModel.create({
+            userId: new Types.ObjectId(userId),
+            credentialId: new Types.ObjectId(credentialId),
+            exchange,
+            externalId,
+            type: TransactionType.WITHDRAWAL,
+            asset: record.coin,
+            amount: record.amount,
+            fee: record.fee || undefined,
+            feeAsset: record.fee ? record.coin : undefined,
+            timestamp: this.parseBinanceDate(record.time),
+            rawData: record as unknown as Record<string, unknown>,
+          });
+          imported++;
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to import withdrawal: ${error.message}`);
+        errors++;
+      }
+    }
+
+    this.logger.log(
+      `Binance withdrawals import: ${imported} imported, ${skipped} skipped, ${errors} errors`,
+    );
+
+    return { imported, skipped, errors };
+  }
+
+  /**
+   * Import Binance transaction history from Excel file
+   * This includes: interest, cashback, trades, card spending, etc.
+   */
+  async importBinanceTransactions(
+    fileBuffer: Buffer,
+    credentialId: string,
+    userId: string,
+  ): Promise<ImportResultDto> {
+    // Get the exchange from the credential
+    const exchange = await this.getCredentialExchange(credentialId, userId);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(fileBuffer as unknown as ExcelJS.Buffer);
+
+    const sheet = workbook.worksheets[0];
+    const records = this.parseBinanceTransactionRows(sheet);
+
+    if (records.length === 0) {
+      throw new BadRequestException('No valid transaction records found in Excel file');
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const record of records) {
+      try {
+        // Skip internal transfers that don't affect external balance
+        if (this.isInternalBinanceTransfer(record.operation)) {
+          skipped++;
+          continue;
+        }
+
+        const mappedType = this.mapBinanceOperationType(record.operation, record.change);
+
+        // Skip if we can't determine the type
+        if (!mappedType) {
+          skipped++;
+          continue;
+        }
+
+        const externalId = `binance-tx-${record.time}-${record.coin}-${record.operation}-${record.change}`;
+
+        const existing = await this.transactionModel.findOne({
+          externalId,
+          credentialId: new Types.ObjectId(credentialId),
+        });
+
+        if (existing) {
+          skipped++;
+        } else {
+          await this.transactionModel.create({
+            userId: new Types.ObjectId(userId),
+            credentialId: new Types.ObjectId(credentialId),
+            exchange,
+            externalId,
+            type: mappedType,
+            asset: record.coin,
+            amount: Math.abs(record.change),
+            timestamp: this.parseBinanceDate(record.time),
+            rawData: record as unknown as Record<string, unknown>,
+          });
+          imported++;
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to import transaction: ${error.message}`);
+        errors++;
+      }
+    }
+
+    this.logger.log(
+      `Binance transactions import: ${imported} imported, ${skipped} skipped, ${errors} errors`,
+    );
+
+    return { imported, skipped, errors };
+  }
+
+  // ==================== BINANCE PARSING HELPERS ====================
+
+  private parseBinanceDepositRows(sheet: ExcelJS.Worksheet): BinanceDepositRow[] {
+    const records: BinanceDepositRow[] = [];
+
+    // Data starts at row 11, headers at row 10
+    // Col 3: Time, Col 4: Coin, Col 6: Network, Col 8: Amount, Col 10: Address, Col 11: TXID, Col 12: Status
+    for (let i = 11; i <= sheet.rowCount; i++) {
+      const row = sheet.getRow(i);
+      const time = row.getCell(3).value?.toString();
+      const coin = row.getCell(4).value?.toString();
+      const network = row.getCell(6).value?.toString();
+      const amount = this.parseAmount(row.getCell(8).value?.toString());
+      const address = row.getCell(10).value?.toString();
+      const txid = row.getCell(11).value?.toString();
+      const status = row.getCell(12).value?.toString();
+
+      if (time && coin && amount > 0 && status?.toLowerCase() === 'completed') {
+        records.push({
+          time,
+          coin,
+          network: network || '',
+          amount,
+          address: address || '',
+          txid: txid || '',
+          status: status || '',
+        });
+      }
+    }
+
+    return records;
+  }
+
+  private parseBinanceWithdrawRows(sheet: ExcelJS.Worksheet): BinanceWithdrawRow[] {
+    const records: BinanceWithdrawRow[] = [];
+
+    // Data starts at row 11, headers at row 10
+    // Col 3: Time, Col 4: Coin, Col 5: Network, Col 6: Amount, Col 8: Fee, Col 10: Address, Col 11: TXID, Col 12: Status
+    for (let i = 11; i <= sheet.rowCount; i++) {
+      const row = sheet.getRow(i);
+      const time = row.getCell(3).value?.toString();
+      const coin = row.getCell(4).value?.toString();
+      const network = row.getCell(5).value?.toString();
+      const amount = this.parseAmount(row.getCell(6).value?.toString());
+      const fee = this.parseAmount(row.getCell(8).value?.toString());
+      const address = row.getCell(10).value?.toString();
+      const txid = row.getCell(11).value?.toString();
+      const status = row.getCell(12).value?.toString();
+
+      if (time && coin && amount > 0 && status?.toLowerCase() === 'completed') {
+        records.push({
+          time,
+          coin,
+          network: network || '',
+          amount,
+          fee: fee || 0,
+          address: address || '',
+          txid: txid || '',
+          status: status || '',
+        });
+      }
+    }
+
+    return records;
+  }
+
+  private parseBinanceTransactionRows(sheet: ExcelJS.Worksheet): BinanceTransactionRow[] {
+    const records: BinanceTransactionRow[] = [];
+
+    // Data starts at row 11, headers at row 10
+    // Columns: 3=UserID, 4=Time, 6=Account, 7=Operation, 9=Coin, 10=Change, 12=Remark
+    for (let i = 11; i <= sheet.rowCount; i++) {
+      const row = sheet.getRow(i);
+      const userId = row.getCell(3).value?.toString();
+      const time = row.getCell(4).value?.toString();
+      const account = row.getCell(6).value?.toString();
+      const operation = row.getCell(7).value?.toString();
+      const coin = row.getCell(9).value?.toString();
+      const change = this.parseAmount(row.getCell(10).value?.toString());
+      const remark = row.getCell(12).value?.toString();
+
+      if (time && operation && coin) {
+        records.push({
+          userId: userId || '',
+          time,
+          account: account || '',
+          operation,
+          coin,
+          change,
+          remark: remark || '',
+        });
+      }
+    }
+
+    return records;
+  }
+
+  private parseBinanceDate(dateStr: string): Date {
+    // Binance format: "23-01-10 19:55:11" (YY-MM-DD HH:mm:ss)
+    // or "26-01-06 15:30:22"
+    const match = dateStr.match(/(\d{2})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+    if (match) {
+      const [, yy, mm, dd, hh, min, ss] = match;
+      const year = parseInt(yy) + 2000;
+      return new Date(year, parseInt(mm) - 1, parseInt(dd), parseInt(hh), parseInt(min), parseInt(ss));
+    }
+    // Try standard parse as fallback
+    return new Date(dateStr);
+  }
+
+  private isInternalBinanceTransfer(operation: string): boolean {
+    const internalOps = [
+      'simple earn flexible subscription',
+      'simple earn flexible redemption',
+      'transfer between main and funding wallet',
+      'asset - transfer',
+      'withdrawal - initiate freeze',
+    ];
+    return internalOps.includes(operation.toLowerCase());
+  }
+
+  private mapBinanceOperationType(operation: string, change: number): TransactionType | null {
+    const op = operation.toLowerCase();
+
+    // Interest/Rewards
+    if (
+      op === 'simple earn flexible interest' ||
+      op === 'simple earn flexible airdrop' ||
+      op === 'binance card cashback' ||
+      op === 'airdrop assets' ||
+      op === 'crypto box' ||
+      op === 'mission reward distribution' ||
+      op === 'asset recovery'
+    ) {
+      return TransactionType.INTEREST;
+    }
+
+    // External Deposits (not from transaction history, but just in case)
+    if (op === 'deposit' || op === 'fiat deposit') {
+      return TransactionType.DEPOSIT;
+    }
+
+    // External Withdrawals
+    if (
+      op === 'withdraw' ||
+      op === 'fiat withdrawal' ||
+      op === 'send'
+    ) {
+      return TransactionType.WITHDRAWAL;
+    }
+
+    // Card spending (negative = withdrawal)
+    if (op === 'binance card spending' || op === 'pre auth - capture') {
+      return TransactionType.WITHDRAWAL;
+    }
+
+    // Trades (using change sign to determine buy/sell is tricky,
+    // but for balance calculation we treat them as trades)
+    if (
+      op === 'transaction buy' ||
+      op === 'transaction sold' ||
+      op === 'transaction spend' ||
+      op === 'transaction revenue' ||
+      op === 'binance convert' ||
+      op === 'small assets exchange bnb' ||
+      op === 'merchant acquiring'
+    ) {
+      return TransactionType.TRADE;
+    }
+
+    // Fees
+    if (op === 'transaction fee') {
+      return TransactionType.FEE;
+    }
+
+    // Unknown - log and skip
+    this.logger.debug(`Unknown Binance operation: ${operation}`);
+    return null;
   }
 }

@@ -7,8 +7,12 @@ import { BinanceAdapter } from './binance/binance.adapter';
 import { NexoAdapter } from './nexo/nexo.adapter';
 import {
   NexoManualAdapter,
-  TransactionsFetcher,
+  TransactionsFetcher as NexoTransactionsFetcher,
 } from './nexo-manual/nexo-manual.adapter';
+import {
+  BinanceManualAdapter,
+  TransactionsFetcher as BinanceTransactionsFetcher,
+} from './binance-manual/binance-manual.adapter';
 
 @Injectable()
 export class ExchangeFactoryService {
@@ -33,12 +37,20 @@ export class ExchangeFactoryService {
         throw new Error(
           'NEXO_MANUAL requires a transactions fetcher. Use createNexoManualAdapter instead.',
         );
+      case ExchangeType.BINANCE_MANUAL:
+        throw new Error(
+          'BINANCE_MANUAL requires a transactions fetcher. Use createBinanceManualAdapter instead.',
+        );
       default:
         throw new Error(`Unsupported exchange: ${exchange}`);
     }
   }
 
-  createNexoManualAdapter(fetchTransactions: TransactionsFetcher): IExchangeAdapter {
+  createNexoManualAdapter(fetchTransactions: NexoTransactionsFetcher): IExchangeAdapter {
     return new NexoManualAdapter(fetchTransactions);
+  }
+
+  createBinanceManualAdapter(fetchTransactions: BinanceTransactionsFetcher): IExchangeAdapter {
+    return new BinanceManualAdapter(fetchTransactions);
   }
 }
