@@ -98,3 +98,48 @@ export class ChartDataResponseDto {
   @ApiProperty({ description: 'Timeframe: 24h, 7d, 1m, 1y' })
   timeframe: string;
 }
+
+export class AssetChartDataDto {
+  @ApiProperty({ description: 'Asset symbol' })
+  asset: string;
+
+  @ApiProperty({ type: [Number], description: 'USD values for this asset' })
+  data: number[];
+}
+
+export class ChartDataByAssetResponseDto {
+  @ApiProperty({ type: [String], description: 'ISO date strings' })
+  labels: string[];
+
+  @ApiProperty({ type: [Number], description: 'Total USD values' })
+  totalData: number[];
+
+  @ApiProperty({ type: [AssetChartDataDto], description: 'Data per asset' })
+  assetData: AssetChartDataDto[];
+
+  @ApiProperty({ description: 'Change in USD from first to last point' })
+  changeUsd: number;
+
+  @ApiProperty({ description: 'Percentage change from first to last point' })
+  changePercent: number;
+
+  @ApiProperty({ description: 'Timeframe: 24h, 7d' })
+  timeframe: string;
+
+  @ApiProperty({ type: [String], description: 'All available assets in the data' })
+  availableAssets: string[];
+}
+
+export class Pnl24hResponseDto {
+  @ApiProperty({ description: 'Current total balance value in USD' })
+  currentValue: number;
+
+  @ApiProperty({ description: 'Balance value 24 hours ago in USD' })
+  value24hAgo: number;
+
+  @ApiProperty({ description: 'Change in USD' })
+  changeUsd: number;
+
+  @ApiProperty({ description: 'Percentage change' })
+  changePercent: number;
+}

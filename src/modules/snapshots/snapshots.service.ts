@@ -10,6 +10,7 @@ import {
 import {
   HourlySnapshot,
   HourlySnapshotDocument,
+  SnapshotAssetBalance,
 } from './schemas/hourly-snapshot.schema';
 import { BalancesService } from '../balances/balances.service';
 import { PricesService } from '../prices/prices.service';
@@ -17,6 +18,8 @@ import {
   SnapshotResponseDto,
   SnapshotCompareDto,
   ChartDataResponseDto,
+  ChartDataByAssetResponseDto,
+  AssetChartDataDto,
 } from './dto/snapshot-response.dto';
 
 @Injectable()
@@ -203,24 +206,28 @@ export class SnapshotsService {
     // Get prices
     const pricesMap = await this.pricesService.getPricesMap(assets);
 
-    // Calculate total value and top assets
-    const assetValues = consolidated.byAsset.map((b) => ({
+    // Calculate all asset balances with USD values
+    const assetBalances: SnapshotAssetBalance[] = consolidated.byAsset.map((b) => ({
       asset: b.asset,
+      amount: b.total,
+      priceUsd: pricesMap[b.asset] || 0,
       valueUsd: b.total * (pricesMap[b.asset] || 0),
     }));
 
-    const totalValueUsd = assetValues.reduce((sum, a) => sum + a.valueUsd, 0);
+    const totalValueUsd = assetBalances.reduce((sum, a) => sum + a.valueUsd, 0);
 
-    // Get top 5 assets by value
-    const topAssets = assetValues
+    // Get top 5 assets by value (for backwards compatibility)
+    const topAssets = [...assetBalances]
       .sort((a, b) => b.valueUsd - a.valueUsd)
-      .slice(0, 5);
+      .slice(0, 5)
+      .map((a) => ({ asset: a.asset, valueUsd: a.valueUsd }));
 
     const snapshot = new this.hourlySnapshotModel({
       userId: new Types.ObjectId(userIdStr),
       timestamp: now,
       totalValueUsd,
       topAssets,
+      assetBalances,
     });
 
     return snapshot.save();
@@ -244,6 +251,94 @@ export class SnapshotsService {
       default:
         return this.get24hChartData(userId);
     }
+  }
+
+  async get24hPnl(userId: string): Promise<{
+    currentValue: number;
+    value24hAgo: number;
+    changeUsd: number;
+    changePercent: number;
+  }> {
+    // Get snapshot closest to 24h ago
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const snapshot = await this.hourlySnapshotModel
+      .findOne({
+        userId: new Types.ObjectId(userId),
+        timestamp: { $lte: since },
+      })
+      .sort({ timestamp: -1 });
+
+    // Get current balance
+    const current = await this.balancesService.getConsolidatedBalances(userId);
+    const currentValue = current.totalValueUsd;
+    const value24hAgo = snapshot?.totalValueUsd || currentValue;
+
+    const changeUsd = currentValue - value24hAgo;
+    const changePercent = value24hAgo > 0 ? (changeUsd / value24hAgo) * 100 : 0;
+
+    return {
+      currentValue,
+      value24hAgo,
+      changeUsd,
+      changePercent,
+    };
+  }
+
+  async getChartDataByAsset(
+    userId: string,
+    timeframe: '24h' | '7d',
+    assets?: string[],
+  ): Promise<ChartDataByAssetResponseDto> {
+    const since =
+      timeframe === '24h'
+        ? new Date(Date.now() - 24 * 60 * 60 * 1000)
+        : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const snapshots = await this.hourlySnapshotModel
+      .find({
+        userId: new Types.ObjectId(userId),
+        timestamp: { $gte: since },
+      })
+      .sort({ timestamp: 1 });
+
+    // Collect all available assets from snapshots
+    const allAssets = new Set<string>();
+    snapshots.forEach((s) => {
+      s.assetBalances?.forEach((ab) => allAssets.add(ab.asset));
+    });
+
+    const availableAssets = Array.from(allAssets).sort();
+    const filteredAssets =
+      assets && assets.length > 0 ? assets : availableAssets;
+
+    // Build data per asset
+    const assetData: AssetChartDataDto[] = filteredAssets.map((asset) => ({
+      asset,
+      data: snapshots.map((s) => {
+        const ab = s.assetBalances?.find((a) => a.asset === asset);
+        return ab?.valueUsd || 0;
+      }),
+    }));
+
+    // Build total data and calculate change
+    const totalData = snapshots.map((s) => s.totalValueUsd);
+    const labels = snapshots.map((s) => s.timestamp.toISOString());
+
+    const firstValue = totalData[0] || 0;
+    const lastValue = totalData[totalData.length - 1] || 0;
+    const changeUsd = lastValue - firstValue;
+    const changePercent = firstValue > 0 ? (changeUsd / firstValue) * 100 : 0;
+
+    return {
+      labels,
+      totalData,
+      assetData,
+      changeUsd,
+      changePercent,
+      timeframe,
+      availableAssets,
+    };
   }
 
   private async get24hChartData(userId: string): Promise<ChartDataResponseDto> {

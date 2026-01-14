@@ -11,6 +11,8 @@ import {
   SnapshotResponseDto,
   SnapshotCompareDto,
   ChartDataResponseDto,
+  ChartDataByAssetResponseDto,
+  Pnl24hResponseDto,
 } from './dto/snapshot-response.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -66,6 +68,46 @@ export class SnapshotsController {
     @CurrentUser('userId') userId: string,
   ): Promise<ChartDataResponseDto> {
     return this.snapshotsService.getChartData(userId, timeframe);
+  }
+
+  @Get('chart-data-by-asset')
+  @ApiOperation({ summary: 'Get chart data with asset breakdown' })
+  @ApiQuery({
+    name: 'timeframe',
+    enum: ['24h', '7d'],
+    example: '24h',
+  })
+  @ApiQuery({
+    name: 'assets',
+    required: false,
+    isArray: true,
+    description: 'Filter by specific assets (comma-separated)',
+  })
+  @ApiResponse({ status: 200, type: ChartDataByAssetResponseDto })
+  async getChartDataByAsset(
+    @Query('timeframe') timeframe: '24h' | '7d' = '24h',
+    @Query('assets') assets?: string | string[],
+    @CurrentUser('userId') userId?: string,
+  ): Promise<ChartDataByAssetResponseDto> {
+    // Handle both comma-separated string and array
+    let assetList: string[] | undefined;
+    if (assets) {
+      if (typeof assets === 'string') {
+        assetList = assets.split(',').map((a) => a.trim());
+      } else {
+        assetList = assets;
+      }
+    }
+    return this.snapshotsService.getChartDataByAsset(userId!, timeframe, assetList);
+  }
+
+  @Get('pnl-24h')
+  @ApiOperation({ summary: 'Get 24h PNL (balance change in last 24 hours)' })
+  @ApiResponse({ status: 200, type: Pnl24hResponseDto })
+  async get24hPnl(
+    @CurrentUser('userId') userId: string,
+  ): Promise<Pnl24hResponseDto> {
+    return this.snapshotsService.get24hPnl(userId);
   }
 
   @Post('generate')

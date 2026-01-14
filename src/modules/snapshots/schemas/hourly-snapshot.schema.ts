@@ -14,6 +14,24 @@ export class TopAsset {
 
 export const TopAssetSchema = SchemaFactory.createForClass(TopAsset);
 
+@Schema({ _id: false })
+export class SnapshotAssetBalance {
+  @Prop({ required: true })
+  asset: string;
+
+  @Prop({ required: true, type: Number })
+  amount: number;
+
+  @Prop({ type: Number })
+  priceUsd?: number;
+
+  @Prop({ required: true, type: Number })
+  valueUsd: number;
+}
+
+export const SnapshotAssetBalanceSchema =
+  SchemaFactory.createForClass(SnapshotAssetBalance);
+
 @Schema({ timestamps: true, collection: 'hourly_snapshots' })
 export class HourlySnapshot {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true })
@@ -27,6 +45,9 @@ export class HourlySnapshot {
 
   @Prop({ type: [TopAssetSchema], default: [] })
   topAssets: TopAsset[];
+
+  @Prop({ type: [SnapshotAssetBalanceSchema], default: [] })
+  assetBalances: SnapshotAssetBalance[];
 }
 
 export const HourlySnapshotSchema = SchemaFactory.createForClass(HourlySnapshot);
