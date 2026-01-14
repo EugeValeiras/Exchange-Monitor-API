@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { DailySnapshot, DailySnapshotSchema } from './schemas/daily-snapshot.schema';
 import { HourlySnapshot, HourlySnapshotSchema } from './schemas/hourly-snapshot.schema';
@@ -6,6 +6,7 @@ import { SnapshotsController } from './snapshots.controller';
 import { SnapshotsService } from './snapshots.service';
 import { BalancesModule } from '../balances/balances.module';
 import { PricesModule } from '../prices/prices.module';
+import { TransactionsModule } from '../transactions/transactions.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { PricesModule } from '../prices/prices.module';
     ]),
     BalancesModule,
     PricesModule,
+    forwardRef(() => TransactionsModule),
   ],
   controllers: [SnapshotsController],
   providers: [SnapshotsService],

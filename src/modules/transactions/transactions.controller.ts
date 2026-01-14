@@ -41,8 +41,19 @@ export class TransactionsController {
   @ApiResponse({ status: 200, type: TransactionStatsDto })
   async getStats(
     @CurrentUser('userId') userId: string,
+    @Query('exchange') exchange?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('types') types?: string,
+    @Query('assets') assets?: string,
   ): Promise<TransactionStatsDto> {
-    return this.transactionsService.getStats(userId);
+    return this.transactionsService.getStats(userId, {
+      exchange,
+      startDate,
+      endDate,
+      types,
+      assets,
+    });
   }
 
   @Post('sync')

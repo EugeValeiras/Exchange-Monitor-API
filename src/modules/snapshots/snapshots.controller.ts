@@ -1,10 +1,11 @@
-import { Controller, Get, Post, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
   ApiQuery,
+  ApiBody,
 } from '@nestjs/swagger';
 import { SnapshotsService } from './snapshots.service';
 import {
@@ -13,6 +14,8 @@ import {
   ChartDataResponseDto,
   ChartDataByAssetResponseDto,
   Pnl24hResponseDto,
+  RebuildHistoryRequestDto,
+  RebuildHistoryResponseDto,
 } from './dto/snapshot-response.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -132,6 +135,26 @@ export class SnapshotsController {
       totalValueUsd: snapshot.totalValueUsd,
       pricesAtSnapshot: snapshot.pricesAtSnapshot,
     };
+  }
+
+  @Post('rebuild-history')
+  @ApiOperation({
+    summary: 'Rebuild historical balance snapshots from transactions',
+    description:
+      'Reconstructs daily balance snapshots by processing all transactions chronologically. ' +
+      'Gets historical prices from Binance for accurate USD valuations. ' +
+      'This operation may take several minutes depending on the transaction history.',
+  })
+  @ApiBody({ type: RebuildHistoryRequestDto })
+  @ApiResponse({ status: 201, type: RebuildHistoryResponseDto })
+  async rebuildHistory(
+    @CurrentUser('userId') userId: string,
+    @Body() body: RebuildHistoryRequestDto,
+  ): Promise<RebuildHistoryResponseDto> {
+    return this.snapshotsService.rebuildHistory(userId, {
+      fromDate: body.fromDate,
+      skipExisting: body.skipExisting,
+    });
   }
 
   @Get(':date')

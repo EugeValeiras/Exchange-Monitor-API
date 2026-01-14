@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Inject, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import {
@@ -14,12 +14,16 @@ import {
 } from './schemas/hourly-snapshot.schema';
 import { BalancesService } from '../balances/balances.service';
 import { PricesService } from '../prices/prices.service';
+import { TransactionsService } from '../transactions/transactions.service';
+import { TransactionDocument } from '../transactions/schemas/transaction.schema';
+import { TransactionType } from '../../common/constants/transaction-types.constant';
 import {
   SnapshotResponseDto,
   SnapshotCompareDto,
   ChartDataResponseDto,
   ChartDataByAssetResponseDto,
   AssetChartDataDto,
+  RebuildHistoryResponseDto,
 } from './dto/snapshot-response.dto';
 
 @Injectable()
@@ -33,6 +37,8 @@ export class SnapshotsService {
     private hourlySnapshotModel: Model<HourlySnapshotDocument>,
     private readonly balancesService: BalancesService,
     private readonly pricesService: PricesService,
+    @Inject(forwardRef(() => TransactionsService))
+    private readonly transactionsService: TransactionsService,
   ) {}
 
   async generateSnapshot(userId: string | Types.ObjectId): Promise<DailySnapshotDocument> {
@@ -512,5 +518,263 @@ export class SnapshotsService {
       totalValueUsd: snapshot.totalValueUsd,
       pricesAtSnapshot: snapshot.pricesAtSnapshot,
     };
+  }
+
+  // ==================== REBUILD HISTORY ====================
+
+  /**
+   * Rebuild historical balance snapshots from transactions
+   * This method recalculates the balance at each day based on transaction history
+   */
+  async rebuildHistory(
+    userId: string,
+    options?: {
+      fromDate?: string;
+      skipExisting?: boolean;
+    },
+  ): Promise<RebuildHistoryResponseDto> {
+    const userIdObj = new Types.ObjectId(userId);
+    this.logger.log(`[RebuildHistory] Starting for user ${userId}`);
+
+    // Get all transactions sorted by timestamp
+    const transactions = await this.transactionsService.findAllByUserSorted(userId);
+
+    if (transactions.length === 0) {
+      this.logger.log(`[RebuildHistory] No transactions found for user`);
+      return {
+        success: true,
+        message: 'No transactions found',
+        daysProcessed: 0,
+        snapshotsCreated: 0,
+        snapshotsUpdated: 0,
+      };
+    }
+
+    // Determine date range
+    const firstTxDate = new Date(transactions[0].timestamp);
+    const startDate = options?.fromDate
+      ? new Date(options.fromDate)
+      : firstTxDate;
+    const endDate = new Date();
+
+    // Set to start of day
+    startDate.setUTCHours(0, 0, 0, 0);
+    endDate.setUTCHours(23, 59, 59, 999);
+
+    this.logger.log(
+      `[RebuildHistory] Processing from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]}`,
+    );
+
+    // Get existing snapshots if we want to skip them
+    const existingDates = new Set<string>();
+    if (options?.skipExisting) {
+      const existing = await this.snapshotModel.find({
+        userId: userIdObj,
+        date: {
+          $gte: startDate.toISOString().split('T')[0],
+          $lte: endDate.toISOString().split('T')[0],
+        },
+      });
+      for (const snapshot of existing) {
+        existingDates.add(snapshot.date);
+      }
+      this.logger.log(`[RebuildHistory] Found ${existingDates.size} existing snapshots to skip`);
+    }
+
+    // Build a running balance from transactions
+    const balanceState = new Map<string, number>(); // asset -> amount
+    let txIndex = 0;
+
+    let daysProcessed = 0;
+    let snapshotsCreated = 0;
+    let snapshotsUpdated = 0;
+
+    // Collect all unique assets for price fetching
+    const allAssets = new Set<string>();
+    for (const tx of transactions) {
+      allAssets.add(tx.asset);
+      if (tx.feeAsset) allAssets.add(tx.feeAsset);
+    }
+
+    // Process day by day
+    const currentDate = new Date(startDate);
+    while (currentDate <= endDate) {
+      const dateStr = currentDate.toISOString().split('T')[0];
+      const dayEnd = new Date(currentDate);
+      dayEnd.setUTCHours(23, 59, 59, 999);
+
+      // Skip if we already have a snapshot and skipExisting is true
+      if (options?.skipExisting && existingDates.has(dateStr)) {
+        // Still need to process transactions to update balance state
+        while (
+          txIndex < transactions.length &&
+          new Date(transactions[txIndex].timestamp) <= dayEnd
+        ) {
+          this.applyTransaction(balanceState, transactions[txIndex]);
+          txIndex++;
+        }
+        currentDate.setDate(currentDate.getDate() + 1);
+        continue;
+      }
+
+      // Process all transactions up to end of this day
+      while (
+        txIndex < transactions.length &&
+        new Date(transactions[txIndex].timestamp) <= dayEnd
+      ) {
+        this.applyTransaction(balanceState, transactions[txIndex]);
+        txIndex++;
+      }
+
+      // Get assets with non-zero balances
+      const assetsWithBalance = Array.from(balanceState.entries())
+        .filter(([_, amount]) => amount > 0.00000001)
+        .map(([asset]) => asset);
+
+      if (assetsWithBalance.length === 0) {
+        currentDate.setDate(currentDate.getDate() + 1);
+        daysProcessed++;
+        continue;
+      }
+
+      // Get historical prices for this date
+      const pricesMap = await this.pricesService.getHistoricalPricesMap(
+        assetsWithBalance,
+        currentDate,
+      );
+
+      // Build consolidated balances
+      const consolidatedBalances: AssetBalance[] = [];
+      let totalValueUsd = 0;
+
+      for (const asset of assetsWithBalance) {
+        const amount = balanceState.get(asset) || 0;
+        const priceUsd = pricesMap[asset] || 0;
+        const valueUsd = amount * priceUsd;
+
+        consolidatedBalances.push({
+          asset,
+          amount,
+          priceUsd,
+          valueUsd,
+        });
+
+        totalValueUsd += valueUsd;
+      }
+
+      // Sort by value descending
+      consolidatedBalances.sort((a, b) => (b.valueUsd || 0) - (a.valueUsd || 0));
+
+      // Check if snapshot exists
+      const existing = await this.snapshotModel.findOne({
+        userId: userIdObj,
+        date: dateStr,
+      });
+
+      const snapshotData = {
+        userId: userIdObj,
+        date: dateStr,
+        snapshotAt: dayEnd,
+        exchangeBalances: [], // We don't have per-exchange breakdown from transactions
+        consolidatedBalances,
+        totalValueUsd,
+        pricesAtSnapshot: pricesMap,
+      };
+
+      if (existing) {
+        Object.assign(existing, snapshotData);
+        await existing.save();
+        snapshotsUpdated++;
+      } else {
+        await this.snapshotModel.create(snapshotData);
+        snapshotsCreated++;
+      }
+
+      daysProcessed++;
+
+      // Log progress every 30 days
+      if (daysProcessed % 30 === 0) {
+        this.logger.log(
+          `[RebuildHistory] Progress: ${daysProcessed} days processed, ${snapshotsCreated} created, ${snapshotsUpdated} updated`,
+        );
+      }
+
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    this.logger.log(
+      `[RebuildHistory] Completed: ${daysProcessed} days processed, ${snapshotsCreated} created, ${snapshotsUpdated} updated`,
+    );
+
+    return {
+      success: true,
+      message: 'History rebuilt successfully',
+      daysProcessed,
+      snapshotsCreated,
+      snapshotsUpdated,
+    };
+  }
+
+  /**
+   * Apply a transaction to the balance state
+   */
+  private applyTransaction(
+    balanceState: Map<string, number>,
+    tx: TransactionDocument,
+  ): void {
+    const currentBalance = balanceState.get(tx.asset) || 0;
+
+    switch (tx.type) {
+      case TransactionType.DEPOSIT:
+      case TransactionType.INTEREST:
+        // Add to balance
+        balanceState.set(tx.asset, currentBalance + tx.amount);
+        break;
+
+      case TransactionType.WITHDRAWAL:
+      case TransactionType.FEE:
+        // Subtract from balance
+        balanceState.set(tx.asset, currentBalance - Math.abs(tx.amount));
+        break;
+
+      case TransactionType.TRADE:
+        // For trades, we need to handle both sides
+        // amount is typically the base asset amount
+        // If side is 'buy', we receive the asset
+        // If side is 'sell', we lose the asset
+        if (tx.side === 'buy') {
+          balanceState.set(tx.asset, currentBalance + Math.abs(tx.amount));
+          // Subtract the quote asset (price * amount)
+          if (tx.priceAsset && tx.price) {
+            const quoteBalance = balanceState.get(tx.priceAsset) || 0;
+            balanceState.set(
+              tx.priceAsset,
+              quoteBalance - Math.abs(tx.amount * tx.price),
+            );
+          }
+        } else if (tx.side === 'sell') {
+          balanceState.set(tx.asset, currentBalance - Math.abs(tx.amount));
+          // Add the quote asset
+          if (tx.priceAsset && tx.price) {
+            const quoteBalance = balanceState.get(tx.priceAsset) || 0;
+            balanceState.set(
+              tx.priceAsset,
+              quoteBalance + Math.abs(tx.amount * tx.price),
+            );
+          }
+        }
+        break;
+
+      case TransactionType.TRANSFER:
+        // Transfers might be in or out, check if amount is positive or negative
+        balanceState.set(tx.asset, currentBalance + tx.amount);
+        break;
+    }
+
+    // Apply fee if present
+    if (tx.fee && tx.feeAsset) {
+      const feeBalance = balanceState.get(tx.feeAsset) || 0;
+      balanceState.set(tx.feeAsset, feeBalance - Math.abs(tx.fee));
+    }
   }
 }

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as ccxt from 'ccxt';
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { AvailableSymbolDto } from './dto/available-symbols.dto';
@@ -13,6 +14,11 @@ export class MarketsCacheService {
   private readonly logger = new Logger(MarketsCacheService.name);
   private cache = new Map<string, CacheEntry>();
   private readonly TTL_MS = 5 * 60 * 1000; // 5 minutes
+  private readonly binanceHostname?: string;
+
+  constructor(private readonly configService: ConfigService) {
+    this.binanceHostname = this.configService.get<string>('BINANCE_HOSTNAME');
+  }
 
   async getAvailableSymbols(
     exchange: ExchangeType,
@@ -89,8 +95,16 @@ export class MarketsCacheService {
 
   private createPublicClient(exchange: ExchangeType): ccxt.Exchange | null {
     switch (exchange) {
-      case ExchangeType.BINANCE:
-        return new ccxt.binance({ enableRateLimit: true });
+      case ExchangeType.BINANCE: {
+        const config: any = { enableRateLimit: true };
+        if (this.binanceHostname === 'binance.us') {
+          return new ccxt.binanceus(config);
+        }
+        if (this.binanceHostname) {
+          config.hostname = this.binanceHostname;
+        }
+        return new ccxt.binance(config);
+      }
       case ExchangeType.KRAKEN:
         return new ccxt.kraken({ enableRateLimit: true });
       default:

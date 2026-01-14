@@ -121,28 +121,69 @@ export class TransactionsService {
       .exec();
   }
 
-  async getStats(userId: string): Promise<TransactionStatsDto> {
-    const transactions = await this.transactionModel.find({
+  async getStats(
+    userId: string,
+    filter?: {
+      exchange?: string;
+      startDate?: string;
+      endDate?: string;
+      types?: string;
+      assets?: string;
+    },
+  ): Promise<TransactionStatsDto> {
+    // Build the main query with all filters
+    const query: FilterQuery<Transaction> = {
       userId: new Types.ObjectId(userId),
-    });
+    };
+
+    // Apply filters
+    if (filter?.exchange) {
+      query.exchange = filter.exchange;
+    }
+    if (filter?.types) {
+      const typesArray = filter.types.split(',').filter((t) => t.trim());
+      if (typesArray.length > 0) {
+        query.type = { $in: typesArray };
+      }
+    }
+    if (filter?.assets) {
+      const assetsArray = filter.assets.split(',').filter((a) => a.trim());
+      if (assetsArray.length > 0) {
+        query.asset = { $in: assetsArray };
+      }
+    }
+    if (filter?.startDate || filter?.endDate) {
+      query.timestamp = {};
+      if (filter.startDate) {
+        query.timestamp.$gte = new Date(filter.startDate);
+      }
+      if (filter.endDate) {
+        query.timestamp.$lte = new Date(filter.endDate);
+      }
+    }
+
+    // Get filtered transactions for stats
+    const transactions = await this.transactionModel.find(query);
 
     const byType: Record<string, number> = {};
     const byExchange: Record<string, number> = {};
     const byAsset: Record<string, number> = {};
-    const interestByAsset: Record<string, number> = {};
 
     for (const tx of transactions) {
       byType[tx.type] = (byType[tx.type] || 0) + 1;
       byExchange[tx.exchange] = (byExchange[tx.exchange] || 0) + 1;
       byAsset[tx.asset] = (byAsset[tx.asset] || 0) + 1;
-
-      // Accumulate interest amounts by asset
-      if (tx.type === TransactionType.INTEREST) {
-        interestByAsset[tx.asset] = (interestByAsset[tx.asset] || 0) + tx.amount;
-      }
     }
 
-    // Calculate total interest in USD
+    // Calculate interest in USD from filtered transactions
+    const interestTransactions = transactions.filter(
+      (tx) => tx.type === TransactionType.INTEREST,
+    );
+    const interestByAsset: Record<string, number> = {};
+    for (const tx of interestTransactions) {
+      interestByAsset[tx.asset] = (interestByAsset[tx.asset] || 0) + tx.amount;
+    }
+
     let totalInterestUsd = 0;
     const interestAssets = Object.keys(interestByAsset);
     if (interestAssets.length > 0) {

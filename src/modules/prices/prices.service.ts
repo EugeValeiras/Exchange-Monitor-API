@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional, Inject, forwardRef } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ExchangeCredentialsService } from '../exchange-credentials/exchange-credentials.service';
 import { SettingsService } from '../settings/settings.service';
 import { ExchangeFactoryService } from '../../integrations/exchanges/exchange-factory.service';
@@ -12,6 +13,7 @@ export class PricesService {
   private readonly logger = new Logger(PricesService.name);
   private priceCache = new Map<string, { price: number; timestamp: Date }>();
   private readonly cacheTtlMs = 60000; // 1 minute cache
+  private readonly binanceHostname?: string;
 
   // USDT is the base currency, always valued at 1
   private readonly stablecoins = new Set(['USDT']);
@@ -26,8 +28,11 @@ export class PricesService {
     @Inject(forwardRef(() => SettingsService))
     private readonly settingsService: SettingsService,
     private readonly exchangeFactory: ExchangeFactoryService,
+    private readonly configService: ConfigService,
     @Optional() private readonly priceAggregator?: PriceAggregatorService,
-  ) {}
+  ) {
+    this.binanceHostname = this.configService.get<string>('BINANCE_HOSTNAME');
+  }
 
   async getPrice(symbol: string, userId?: string): Promise<PriceResponseDto> {
     // Check cache first
@@ -302,6 +307,89 @@ export class PricesService {
     return this.settingsService.getConfiguredBaseAssets();
   }
 
+  /**
+   * Get historical prices for multiple assets at a specific date
+   * Uses Binance klines API to fetch OHLCV data
+   */
+  async getHistoricalPricesMap(
+    assets: string[],
+    date: Date,
+  ): Promise<Record<string, number>> {
+    const pricesMap: Record<string, number> = {};
+    const ccxt = await import('ccxt');
+
+    // Create Binance client
+    const config: any = { enableRateLimit: true };
+    if (this.binanceHostname === 'binance.us') {
+      const client = new ccxt.binanceus(config);
+      return this.fetchHistoricalPricesWithClient(client, assets, date, pricesMap);
+    } else {
+      if (this.binanceHostname) {
+        config.hostname = this.binanceHostname;
+      }
+      const client = new ccxt.binance(config);
+      return this.fetchHistoricalPricesWithClient(client, assets, date, pricesMap);
+    }
+  }
+
+  private async fetchHistoricalPricesWithClient(
+    client: any,
+    assets: string[],
+    date: Date,
+    pricesMap: Record<string, number>,
+  ): Promise<Record<string, number>> {
+    const timestamp = date.getTime();
+
+    for (const asset of assets) {
+      const normalized = this.normalizeAsset(asset);
+
+      // Handle stablecoins
+      if (this.stablecoins.has(normalized)) {
+        pricesMap[asset] = 1;
+        continue;
+      }
+
+      // Handle unpriceable assets
+      if (this.unpriceable.has(normalized)) {
+        pricesMap[asset] = 0;
+        continue;
+      }
+
+      try {
+        // Try USDT pair first
+        const symbol = `${normalized}/USDT`;
+        const ohlcv = await client.fetchOHLCV(symbol, '1d', timestamp, 1);
+
+        if (ohlcv && ohlcv.length > 0) {
+          // Use close price [timestamp, open, high, low, close, volume]
+          pricesMap[asset] = ohlcv[0][4];
+          this.logger.debug(`Historical price for ${asset} on ${date.toISOString().split('T')[0]}: $${ohlcv[0][4]}`);
+        } else {
+          pricesMap[asset] = 0;
+        }
+      } catch (error) {
+        // Try USD pair as fallback
+        try {
+          const symbol = `${normalized}/USD`;
+          const ohlcv = await client.fetchOHLCV(symbol, '1d', timestamp, 1);
+          if (ohlcv && ohlcv.length > 0) {
+            pricesMap[asset] = ohlcv[0][4];
+          } else {
+            pricesMap[asset] = 0;
+          }
+        } catch {
+          this.logger.debug(`No historical price found for ${asset}`);
+          pricesMap[asset] = 0;
+        }
+      }
+
+      // Small delay to respect rate limits
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return pricesMap;
+  }
+
   private async fetchPriceFromExchange(
     exchange: ExchangeType,
     symbol: string,
@@ -312,9 +400,18 @@ export class PricesService {
 
     let client: InstanceType<typeof ccxt.Exchange>;
     switch (exchange) {
-      case ExchangeType.BINANCE:
-        client = new ccxt.binance({ enableRateLimit: true });
+      case ExchangeType.BINANCE: {
+        const config: any = { enableRateLimit: true };
+        if (this.binanceHostname === 'binance.us') {
+          client = new ccxt.binanceus(config);
+        } else {
+          if (this.binanceHostname) {
+            config.hostname = this.binanceHostname;
+          }
+          client = new ccxt.binance(config);
+        }
         break;
+      }
       case ExchangeType.KRAKEN:
         client = new ccxt.kraken({ enableRateLimit: true });
         break;

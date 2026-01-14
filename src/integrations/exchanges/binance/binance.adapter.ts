@@ -8,11 +8,11 @@ import {
 
 export class BinanceAdapter extends BaseExchangeAdapter {
   readonly exchangeName = 'binance';
-  private client: ccxt.binance;
+  private client: ccxt.Exchange;
 
-  constructor(apiKey: string, apiSecret: string) {
+  constructor(apiKey: string, apiSecret: string, hostname?: string) {
     super();
-    this.client = new ccxt.binance({
+    const config: any = {
       apiKey,
       secret: apiSecret,
       enableRateLimit: true,
@@ -20,7 +20,19 @@ export class BinanceAdapter extends BaseExchangeAdapter {
         defaultType: 'spot',
         adjustForTimeDifference: true,
       },
-    });
+    };
+
+    // Use binanceus class for Binance US, otherwise use regular binance
+    if (hostname === 'binance.us') {
+      this.logger.log('Using Binance US (binanceus)');
+      this.client = new ccxt.binanceus(config);
+    } else {
+      if (hostname) {
+        config.hostname = hostname;
+        this.logger.log(`Using Binance hostname: ${hostname}`);
+      }
+      this.client = new ccxt.binance(config);
+    }
   }
 
   async testConnection(): Promise<boolean> {

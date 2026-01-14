@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as WebSocket from 'ws';
 import {
   IExchangeStream,
@@ -19,12 +20,18 @@ export class BinanceStreamService implements IExchangeStream, OnModuleDestroy {
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
+  private readonly streamHost: string;
 
   private readonly config: StreamConfig = {
     reconnectInterval: 5000,
     maxReconnectAttempts: 10,
     pingInterval: 30000,
   };
+
+  constructor(private readonly configService: ConfigService) {
+    this.streamHost = this.configService.get<string>('BINANCE_STREAM_HOST') || 'stream.binance.com';
+    this.logger.log(`Using Binance stream host: ${this.streamHost}`);
+  }
 
   async connect(): Promise<void> {
     if (this.ws?.readyState === WS_OPEN) {
@@ -38,8 +45,8 @@ export class BinanceStreamService implements IExchangeStream, OnModuleDestroy {
         .join('/');
       const url =
         symbols.length > 0
-          ? `wss://stream.binance.com:9443/stream?streams=${streams}`
-          : `wss://stream.binance.com:9443/ws/btcusdt@ticker`;
+          ? `wss://${this.streamHost}:9443/stream?streams=${streams}`
+          : `wss://${this.streamHost}:9443/ws/btcusdt@ticker`;
 
       this.logger.log(`Connecting to Binance WebSocket: ${url}`);
       this.ws = new WebSocket(url);

@@ -143,3 +143,28 @@ export class Pnl24hResponseDto {
   @ApiProperty({ description: 'Percentage change' })
   changePercent: number;
 }
+
+export class RebuildHistoryRequestDto {
+  @ApiProperty({ required: false, example: '2024-01-01', description: 'Start date for rebuilding (YYYY-MM-DD). If not provided, uses first transaction date.' })
+  fromDate?: string;
+
+  @ApiProperty({ required: false, default: false, description: 'If true, skip dates that already have snapshots' })
+  skipExisting?: boolean;
+}
+
+export class RebuildHistoryResponseDto {
+  @ApiProperty({ description: 'Whether the operation succeeded' })
+  success: boolean;
+
+  @ApiProperty({ description: 'Status message' })
+  message: string;
+
+  @ApiProperty({ description: 'Number of days processed' })
+  daysProcessed: number;
+
+  @ApiProperty({ description: 'Number of new snapshots created' })
+  snapshotsCreated: number;
+
+  @ApiProperty({ description: 'Number of existing snapshots updated' })
+  snapshotsUpdated: number;
+}
