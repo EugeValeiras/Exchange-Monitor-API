@@ -18,6 +18,7 @@ import { PricesModule } from './modules/prices/prices.module';
 import { SnapshotsModule } from './modules/snapshots/snapshots.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { PnlModule } from './modules/pnl/pnl.module';
+import { HealthModule } from './modules/health/health.module';
 import { JobsModule } from './jobs/jobs.module';
 
 @Module({
@@ -54,6 +55,7 @@ import { JobsModule } from './jobs/jobs.module';
     SnapshotsModule,
     SettingsModule,
     PnlModule,
+    HealthModule,
 
     // Jobs
     JobsModule,

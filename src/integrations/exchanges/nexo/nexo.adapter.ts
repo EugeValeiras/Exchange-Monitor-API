@@ -84,7 +84,7 @@ export class NexoAdapter extends BaseExchangeAdapter {
     }
   }
 
-  async fetchTrades(since?: Date): Promise<ITransaction[]> {
+  async fetchTrades(since?: Date, _symbol?: string, _symbols?: string[]): Promise<ITransaction[]> {
     try {
       const response = await this.client.getTrades({
         startDate: since?.getTime(),

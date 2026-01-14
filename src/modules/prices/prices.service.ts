@@ -157,19 +157,35 @@ export class PricesService {
       }
 
       // Try to get from WebSocket cache first (instant!)
+      // Prefer USD (real dollars) over USDT (stablecoin)
       if (this.priceAggregator) {
-        const wsPrice = this.priceAggregator.getLatestPrice(`${normalized}/USDT`);
+        // First try USD pair (Kraken has real USD prices)
+        let wsPrice = this.priceAggregator.getLatestPrice(`${normalized}/USD`);
+        if (wsPrice && wsPrice.price > 0) {
+          pricesMap[asset] = wsPrice.price;
+          this.logger.debug(`[WS Cache HIT] ${asset} (${normalized}/USD) = ${wsPrice.price}`);
+          continue;
+        }
+
+        // Fallback to USDT pair (Binance)
+        wsPrice = this.priceAggregator.getLatestPrice(`${normalized}/USDT`);
         if (wsPrice && wsPrice.price > 0) {
           pricesMap[asset] = wsPrice.price;
           this.logger.debug(`[WS Cache HIT] ${asset} (${normalized}/USDT) = ${wsPrice.price}`);
           continue;
-        } else {
-          this.logger.debug(`[WS Cache MISS] ${asset} (${normalized}/USDT) - wsPrice: ${JSON.stringify(wsPrice)}`);
         }
+
+        this.logger.debug(`[WS Cache MISS] ${asset} - no USD or USDT price found`);
       }
 
-      // Also check local cache
-      const cached = this.priceCache.get(`${normalized}/USDT`);
+      // Also check local cache (prefer USD)
+      let cached = this.priceCache.get(`${normalized}/USD`);
+      if (cached && Date.now() - cached.timestamp.getTime() < this.cacheTtlMs) {
+        pricesMap[asset] = cached.price;
+        continue;
+      }
+
+      cached = this.priceCache.get(`${normalized}/USDT`);
       if (cached && Date.now() - cached.timestamp.getTime() < this.cacheTtlMs) {
         pricesMap[asset] = cached.price;
         continue;

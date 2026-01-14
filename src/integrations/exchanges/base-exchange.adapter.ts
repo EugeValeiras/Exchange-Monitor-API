@@ -18,7 +18,7 @@ export abstract class BaseExchangeAdapter implements IExchangeAdapter {
   abstract fetchBalances(): Promise<IBalance[]>;
   abstract fetchDeposits(since?: Date): Promise<ITransaction[]>;
   abstract fetchWithdrawals(since?: Date): Promise<ITransaction[]>;
-  abstract fetchTrades(since?: Date, symbol?: string): Promise<ITransaction[]>;
+  abstract fetchTrades(since?: Date, symbol?: string, symbols?: string[]): Promise<ITransaction[]>;
   abstract fetchPrice(symbol: string): Promise<IPrice>;
   abstract fetchPrices(symbols: string[]): Promise<IPrice[]>;
 

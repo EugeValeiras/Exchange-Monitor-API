@@ -6,6 +6,7 @@ import { ExchangeCredentialsService } from '../exchange-credentials/exchange-cre
 import { ExchangeFactoryService } from '../../integrations/exchanges/exchange-factory.service';
 import { PricesService } from '../prices/prices.service';
 import { PnlService } from '../pnl/pnl.service';
+import { SettingsService } from '../settings/settings.service';
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { TransactionType } from '../../common/constants/transaction-types.constant';
 import { TransactionFilterDto } from './dto/transaction-filter.dto';
@@ -27,6 +28,7 @@ export class TransactionsService {
     private readonly pricesService: PricesService,
     @Inject(forwardRef(() => PnlService))
     private readonly pnlService: PnlService,
+    private readonly settingsService: SettingsService,
   ) {}
 
   async findAll(
@@ -200,17 +202,36 @@ export class TransactionsService {
 
     this.logger.log(`Fetching transactions since: ${since ? since.toISOString() : 'beginning of time'}`);
 
+    // Get configured symbols for trade sync (per exchange)
+    const symbols = await this.settingsService.getSymbolsForExchange(
+      credential.userId.toString(),
+      credential.exchange,
+    );
+    this.logger.log(`Configured symbols for ${credential.exchange}: ${symbols.length > 0 ? symbols.join(', ') : 'none'}`);
+
     let newTransactions = 0;
 
     try {
-      const [deposits, withdrawals, trades] = await Promise.all([
+      // Fetch standard transactions
+      const fetchPromises: Promise<ITransaction[]>[] = [
         adapter.fetchDeposits(since),
         adapter.fetchWithdrawals(since),
-        adapter.fetchTrades(since),
-      ]);
+        adapter.fetchTrades(since, undefined, symbols),
+      ];
+
+      // Add ledger fetch if supported (for buy/sell/convert operations)
+      if (adapter.fetchLedger) {
+        fetchPromises.push(adapter.fetchLedger(since, symbols));
+      }
+
+      const results = await Promise.all(fetchPromises);
+      const deposits = results[0];
+      const withdrawals = results[1];
+      const trades = results[2];
+      const ledgerTrades = results[3] || [];
 
       this.logger.log(
-        `Fetched from ${credential.exchange}: ${deposits.length} deposits, ${withdrawals.length} withdrawals, ${trades.length} trades`,
+        `Fetched from ${credential.exchange}: ${deposits.length} deposits, ${withdrawals.length} withdrawals, ${trades.length} trades, ${ledgerTrades.length} ledger trades`,
       );
 
       // Process deposits
@@ -263,6 +284,24 @@ export class TransactionsService {
         } catch (error) {
           if (!error.message?.includes('duplicate')) {
             this.logger.warn(`Failed to save transaction: ${error.message}`);
+          }
+        }
+      }
+
+      // Process ledger trades (buy/sell/convert from instant purchases)
+      for (const tx of ledgerTrades) {
+        try {
+          await this.upsertTransaction(
+            credential.userId.toString(),
+            credential._id.toString(),
+            credential.exchange,
+            tx,
+            TransactionType.TRADE,
+          );
+          newTransactions++;
+        } catch (error) {
+          if (!error.message?.includes('duplicate')) {
+            this.logger.warn(`Failed to save ledger transaction: ${error.message}`);
           }
         }
       }

@@ -110,7 +110,7 @@ export class NexoManualAdapter extends BaseExchangeAdapter {
     return [];
   }
 
-  async fetchTrades(_since?: Date, _symbol?: string): Promise<ITransaction[]> {
+  async fetchTrades(_since?: Date, _symbol?: string, _symbols?: string[]): Promise<ITransaction[]> {
     return [];
   }
 

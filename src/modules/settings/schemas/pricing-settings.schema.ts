@@ -8,8 +8,13 @@ export class PricingSettings {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, unique: true })
   userId: Types.ObjectId;
 
+  // DEPRECATED - kept for backward compatibility
   @Prop({ type: [String], default: [] })
   symbols: string[];
+
+  // NEW - symbols per exchange
+  @Prop({ type: Object, default: {} })
+  symbolsByExchange: Record<string, string[]>;
 }
 
 export const PricingSettingsSchema =

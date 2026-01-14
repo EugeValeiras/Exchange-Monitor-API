@@ -53,13 +53,14 @@ export class PriceAggregatorService implements OnModuleInit {
 
   private async initializeStreamsFromSettings(): Promise<void> {
     try {
-      // Get symbols from global settings
-      const symbols = await this.loadSymbolsFromSettings();
+      // Get symbols grouped by exchange
+      const symbolsByExchange = await this.loadSymbolsByExchange();
+      const total = Object.values(symbolsByExchange).reduce((acc, s) => acc + s.length, 0);
 
-      this.logger.log(`Loaded ${symbols.length} symbols from settings`);
+      this.logger.log(`Loaded ${total} symbols from settings`);
 
       // Subscribe to symbols
-      this.subscribeToSymbolsInternal(symbols);
+      this.subscribeToSymbolsInternal(symbolsByExchange);
 
       // Connect to both streams
       await Promise.allSettled([
@@ -84,54 +85,62 @@ export class PriceAggregatorService implements OnModuleInit {
     }
   }
 
-  private async loadSymbolsFromSettings(): Promise<string[]> {
+  private async loadSymbolsByExchange(): Promise<Record<string, string[]>> {
     if (!this.settingsService) {
       this.logger.warn('SettingsService not available, using default symbols');
-      return this.defaultSymbols;
+      return { binance: this.defaultSymbols };
     }
 
     try {
-      const symbols = await this.settingsService.getAllConfiguredSymbols();
+      const symbolsByExchange = await this.settingsService.getAllConfiguredSymbolsByExchange();
 
-      // If no symbols configured, use defaults
-      if (symbols.length === 0) {
+      // If no symbols configured, use defaults for Binance
+      const hasSymbols = Object.values(symbolsByExchange).some((s) => s.length > 0);
+      if (!hasSymbols) {
         this.logger.log('No symbols configured in settings, using defaults');
-        return this.defaultSymbols;
+        return { binance: this.defaultSymbols };
       }
 
-      return symbols;
+      return symbolsByExchange;
     } catch (error) {
       this.logger.error(`Error loading settings: ${error.message}`);
-      return this.defaultSymbols;
+      return { binance: this.defaultSymbols };
     }
   }
 
-  private subscribeToSymbolsInternal(symbols: string[]): void {
-    // Update current symbols set
-    this.currentSymbols = new Set(symbols);
-    this.logger.log(`[Subscribe] Total symbols to subscribe: ${symbols.length}`);
-    this.logger.log(`[Subscribe] Symbols: ${symbols.join(', ')}`);
+  private subscribeToSymbolsInternal(symbolsByExchange: Record<string, string[]>): void {
+    // Update current symbols set (all symbols from all exchanges)
+    const allSymbols: string[] = [];
+    Object.values(symbolsByExchange).forEach((symbols) => {
+      allSymbols.push(...symbols);
+    });
+    this.currentSymbols = new Set(allSymbols);
+
+    this.logger.log(`[Subscribe] Total symbols: ${allSymbols.length}`);
 
     // Clear price cache to remove old symbols
     this.priceCache.clear();
 
-    // Set subscriptions for USDT pairs on Binance (replaces previous)
-    const binanceSymbols = symbols.filter((s) => s.includes('/USDT'));
-    this.binanceStream.setSubscriptions(binanceSymbols);
-    this.logger.log(`[Subscribe] Binance USDT pairs (${binanceSymbols.length}): ${binanceSymbols.join(', ')}`);
+    // Subscribe Binance to its configured symbols
+    const binanceSymbols = symbolsByExchange['binance'] || [];
+    if (binanceSymbols.length > 0) {
+      this.binanceStream.setSubscriptions(binanceSymbols);
+      this.logger.log(`[Subscribe] Binance (${binanceSymbols.length}): ${binanceSymbols.join(', ')}`);
+    }
 
-    // Set subscriptions for USD pairs on Kraken (replaces previous)
-    const krakenSymbols = symbols
-      .map((s) => s.replace('USDT', 'USD'))
-      .filter((s) => s.includes('/USD'));
-    this.krakenStream.setSubscriptions(krakenSymbols);
-    this.logger.log(`[Subscribe] Kraken USD pairs (${krakenSymbols.length}): ${krakenSymbols.join(', ')}`);
+    // Subscribe Kraken to its configured symbols
+    const krakenSymbols = symbolsByExchange['kraken'] || [];
+    if (krakenSymbols.length > 0) {
+      this.krakenStream.setSubscriptions(krakenSymbols);
+      this.logger.log(`[Subscribe] Kraken (${krakenSymbols.length}): ${krakenSymbols.join(', ')}`);
+    }
   }
 
   async refreshSubscriptions(): Promise<void> {
-    const symbols = await this.loadSymbolsFromSettings();
-    this.subscribeToSymbolsInternal(symbols);
-    this.logger.log(`Refreshed subscriptions with ${symbols.length} symbols`);
+    const symbolsByExchange = await this.loadSymbolsByExchange();
+    this.subscribeToSymbolsInternal(symbolsByExchange);
+    const total = Object.values(symbolsByExchange).reduce((acc, s) => acc + s.length, 0);
+    this.logger.log(`Refreshed subscriptions with ${total} total symbols`);
   }
 
   private handlePriceUpdate(update: PriceUpdate): void {
@@ -171,18 +180,21 @@ export class PriceAggregatorService implements OnModuleInit {
   }
 
   private normalizeSymbol(symbol: string): string {
-    // Normalize USD/USDT variations to USDT
-    // Only replace /USD if it's at the end (not /USDT which would become /USDTT)
-    if (symbol.endsWith('/USD')) {
-      return symbol + 'T';
-    }
+    // Keep USD and USDT as separate entries - no conversion
+    // This allows us to prefer real USD prices over USDT
     return symbol;
   }
 
   private calculateBestPrice(
     prices: { exchange: string; price: number }[],
   ): number {
-    // Use Binance as primary source if available
+    // Prefer Kraken (real USD) over Binance (USDT) for accurate USD valuation
+    const krakenPrice = prices.find((p) => p.exchange === 'kraken');
+    if (krakenPrice) {
+      return krakenPrice.price;
+    }
+
+    // Fallback to Binance (USDT ≈ USD)
     const binancePrice = prices.find((p) => p.exchange === 'binance');
     if (binancePrice) {
       return binancePrice.price;
@@ -195,16 +207,25 @@ export class PriceAggregatorService implements OnModuleInit {
   }
 
   getLatestPrice(symbol: string): AggregatedPrice | undefined {
-    const normalized = this.normalizeSymbol(symbol);
-    const price = this.priceCache.get(normalized);
+    // Try exact symbol first
+    let price = this.priceCache.get(symbol);
+    if (price) return price;
 
-    // Debug: log cache lookup
-    if (!price) {
-      const cachedKeys = Array.from(this.priceCache.keys());
-      this.logger.debug(`[Cache Lookup] ${symbol} -> ${normalized} NOT FOUND. Cached symbols: ${cachedKeys.join(', ')}`);
+    // If looking for /USDT, also check /USD (prefer real USD)
+    if (symbol.endsWith('/USDT')) {
+      const usdSymbol = symbol.replace('/USDT', '/USD');
+      price = this.priceCache.get(usdSymbol);
+      if (price) return price;
     }
 
-    return price;
+    // If looking for /USD, also check /USDT as fallback
+    if (symbol.endsWith('/USD')) {
+      const usdtSymbol = symbol + 'T';
+      price = this.priceCache.get(usdtSymbol);
+      if (price) return price;
+    }
+
+    return undefined;
   }
 
   getAllPrices(): AggregatedPrice[] {

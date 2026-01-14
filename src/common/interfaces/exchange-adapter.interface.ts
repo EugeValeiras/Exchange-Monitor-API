@@ -33,7 +33,8 @@ export interface IExchangeAdapter {
   fetchBalances(): Promise<IBalance[]>;
   fetchDeposits(since?: Date): Promise<ITransaction[]>;
   fetchWithdrawals(since?: Date): Promise<ITransaction[]>;
-  fetchTrades(since?: Date, symbol?: string): Promise<ITransaction[]>;
+  fetchTrades(since?: Date, symbol?: string, symbols?: string[]): Promise<ITransaction[]>;
+  fetchLedger?(since?: Date, symbols?: string[]): Promise<ITransaction[]>;
   fetchPrice(symbol: string): Promise<IPrice>;
   fetchPrices(symbols: string[]): Promise<IPrice[]>;
 }

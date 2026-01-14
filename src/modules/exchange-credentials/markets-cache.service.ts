@@ -55,13 +55,13 @@ export class MarketsCacheService {
       const symbols: AvailableSymbolDto[] = [];
 
       for (const symbol of client.symbols) {
-        // Only include USDT and USD pairs
-        if (!symbol.endsWith('/USDT') && !symbol.endsWith('/USD')) {
+        const market = client.markets[symbol];
+        if (!market || !market.active) {
           continue;
         }
 
-        const market = client.markets[symbol];
-        if (!market || !market.active) {
+        // Skip leveraged tokens and other derivatives
+        if (symbol.includes('BULL') || symbol.includes('BEAR') || symbol.includes('UP/') || symbol.includes('DOWN/')) {
           continue;
         }
 
@@ -101,10 +101,10 @@ export class MarketsCacheService {
   private normalizeSymbol(symbol: string, exchange: ExchangeType): string {
     if (exchange === ExchangeType.KRAKEN) {
       // Kraken uses XBT instead of BTC, XDG instead of DOGE
+      // Keep USD pairs as-is (don't convert to USDT) so users can select actual Kraken pairs
       return symbol
         .replace('XBT/', 'BTC/')
-        .replace('XDG/', 'DOGE/')
-        .replace('/USD', '/USDT'); // Normalize to USDT
+        .replace('XDG/', 'DOGE/');
     }
     return symbol;
   }

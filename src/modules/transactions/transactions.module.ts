@@ -7,6 +7,7 @@ import { ExchangeCredentialsModule } from '../exchange-credentials/exchange-cred
 import { ExchangesModule } from '../../integrations/exchanges/exchanges.module';
 import { PricesModule } from '../prices/prices.module';
 import { PnlModule } from '../pnl/pnl.module';
+import { SettingsModule } from '../settings/settings.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { PnlModule } from '../pnl/pnl.module';
     ExchangesModule,
     PricesModule,
     forwardRef(() => PnlModule),
+    SettingsModule,
   ],
   controllers: [TransactionsController],
   providers: [TransactionsService],

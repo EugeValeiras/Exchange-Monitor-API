@@ -13,12 +13,14 @@ import {
   ApiResponse,
   ApiBearerAuth,
   ApiQuery,
+  ApiParam,
 } from '@nestjs/swagger';
 import { SettingsService } from './settings.service';
 import { MarketsCacheService } from '../exchange-credentials/markets-cache.service';
 import {
-  UpdatePricingSymbolsDto,
-  PricingSymbolsResponseDto,
+  UpdateExchangeSymbolsDto,
+  ExchangeSymbolsResponseDto,
+  AllSymbolsResponseDto,
 } from './dto/update-symbols.dto';
 import { AvailableSymbolsResponseDto } from '../exchange-credentials/dto/available-symbols.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -35,30 +37,18 @@ export class SettingsController {
     private readonly marketsCacheService: MarketsCacheService,
   ) {}
 
+  // Get all symbols grouped by exchange
   @Get('symbols')
-  @ApiOperation({ summary: 'Get configured pricing symbols for current user' })
-  @ApiResponse({ status: 200, type: PricingSymbolsResponseDto })
-  async getSymbols(
+  @ApiOperation({ summary: 'Get all configured symbols grouped by exchange' })
+  @ApiResponse({ status: 200, type: AllSymbolsResponseDto })
+  async getAllSymbols(
     @CurrentUser('userId') userId: string,
-  ): Promise<PricingSymbolsResponseDto> {
-    const symbols = await this.settingsService.getSymbols(userId);
-    return { symbols };
+  ): Promise<AllSymbolsResponseDto> {
+    const symbolsByExchange = await this.settingsService.getAllSymbolsByExchange(userId);
+    return { symbolsByExchange };
   }
 
-  @Put('symbols')
-  @ApiOperation({ summary: 'Update pricing symbols for current user' })
-  @ApiResponse({ status: 200, type: PricingSymbolsResponseDto })
-  async updateSymbols(
-    @CurrentUser('userId') userId: string,
-    @Body() dto: UpdatePricingSymbolsDto,
-  ): Promise<PricingSymbolsResponseDto> {
-    const symbols = await this.settingsService.updateSymbols(
-      userId,
-      dto.symbols,
-    );
-    return { symbols };
-  }
-
+  // Get available symbols for an exchange (must be before :exchange param route)
   @Get('symbols/available/:exchange')
   @ApiOperation({ summary: 'Get available symbols for an exchange' })
   @ApiResponse({ status: 200, type: AvailableSymbolsResponseDto })
@@ -77,5 +67,36 @@ export class SettingsController {
       total: result.symbols.length,
       cachedAt: result.cachedAt,
     };
+  }
+
+  // Get symbols for a specific exchange
+  @Get('symbols/:exchange')
+  @ApiOperation({ summary: 'Get configured symbols for a specific exchange' })
+  @ApiResponse({ status: 200, type: ExchangeSymbolsResponseDto })
+  @ApiParam({ name: 'exchange', example: 'binance' })
+  async getExchangeSymbols(
+    @CurrentUser('userId') userId: string,
+    @Param('exchange') exchange: string,
+  ): Promise<ExchangeSymbolsResponseDto> {
+    const symbols = await this.settingsService.getSymbolsForExchange(userId, exchange);
+    return { exchange, symbols };
+  }
+
+  // Update symbols for a specific exchange
+  @Put('symbols/:exchange')
+  @ApiOperation({ summary: 'Update symbols for a specific exchange' })
+  @ApiResponse({ status: 200, type: ExchangeSymbolsResponseDto })
+  @ApiParam({ name: 'exchange', example: 'binance' })
+  async updateExchangeSymbols(
+    @CurrentUser('userId') userId: string,
+    @Param('exchange') exchange: string,
+    @Body() dto: UpdateExchangeSymbolsDto,
+  ): Promise<ExchangeSymbolsResponseDto> {
+    const symbols = await this.settingsService.updateSymbolsForExchange(
+      userId,
+      exchange,
+      dto.symbols,
+    );
+    return { exchange, symbols };
   }
 }

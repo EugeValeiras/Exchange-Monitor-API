@@ -107,26 +107,39 @@ export class BinanceAdapter extends BaseExchangeAdapter {
     }
   }
 
-  async fetchTrades(since?: Date, symbol?: string): Promise<ITransaction[]> {
+  async fetchTrades(since?: Date, symbol?: string, symbols?: string[]): Promise<ITransaction[]> {
     try {
       const sinceTimestamp = since ? since.getTime() : undefined;
 
-      if (!symbol) {
+      // If a specific symbol is provided, fetch only that
+      if (symbol) {
+        const trades = await this.client.fetchMyTrades(symbol, sinceTimestamp);
+        return this.mapTrades(trades);
+      }
+
+      // If symbols array is provided, iterate over those
+      if (symbols && symbols.length > 0) {
         await this.client.loadMarkets();
-        const commonPairs = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT'];
         const allTrades: ITransaction[] = [];
 
-        for (const pair of commonPairs) {
-          if (this.client.markets[pair]) {
-            const trades = await this.client.fetchMyTrades(pair, sinceTimestamp);
-            allTrades.push(...this.mapTrades(trades));
+        this.logger.log(`Fetching trades for configured symbols: ${symbols.join(', ')}`);
+
+        for (const sym of symbols) {
+          if (this.client.markets[sym]) {
+            try {
+              const trades = await this.client.fetchMyTrades(sym, sinceTimestamp);
+              allTrades.push(...this.mapTrades(trades));
+            } catch (error) {
+              this.logger.debug(`No trades or error for ${sym}: ${error.message}`);
+            }
           }
         }
         return allTrades;
       }
 
-      const trades = await this.client.fetchMyTrades(symbol, sinceTimestamp);
-      return this.mapTrades(trades);
+      // Fallback: no symbols configured
+      this.logger.warn('No symbols configured for trade sync');
+      return [];
     } catch (error) {
       this.handleError(error as Error, 'fetchTrades');
     }
