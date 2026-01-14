@@ -14,6 +14,9 @@ export interface PriceUpdate {
   symbol: string;
   price: number;
   timestamp: Date;
+  change24h?: number;
+  high24h?: number;
+  low24h?: number;
 }
 
 export interface AggregatedPrice {
@@ -21,7 +24,10 @@ export interface AggregatedPrice {
   price: number;
   timestamp: Date;
   source: string;
-  prices: { exchange: string; price: number }[];
+  prices: { exchange: string; price: number; change24h?: number }[];
+  change24h?: number;
+  high24h?: number;
+  low24h?: number;
 }
 
 export interface StreamConfig {

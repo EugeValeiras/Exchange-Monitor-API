@@ -158,19 +158,28 @@ export class PriceAggregatorService implements OnModuleInit {
       (p) => p.exchange === update.exchange,
     );
 
+    const priceEntry = {
+      exchange: update.exchange,
+      price: update.price,
+      change24h: update.change24h,
+    };
+
     if (exchangeIndex >= 0) {
-      prices[exchangeIndex] = { exchange: update.exchange, price: update.price };
+      prices[exchangeIndex] = priceEntry;
     } else {
-      prices.push({ exchange: update.exchange, price: update.price });
+      prices.push(priceEntry);
     }
 
-    // Calculate best price (prefer Binance as primary source)
+    // Calculate best price (prefer Kraken for USD, Binance for USDT)
     const aggregated: AggregatedPrice = {
       symbol: normalizedSymbol,
       price: this.calculateBestPrice(prices),
       timestamp: update.timestamp,
       source: update.exchange,
       prices,
+      change24h: update.change24h,
+      high24h: update.high24h,
+      low24h: update.low24h,
     };
 
     this.priceCache.set(normalizedSymbol, aggregated);
@@ -207,25 +216,7 @@ export class PriceAggregatorService implements OnModuleInit {
   }
 
   getLatestPrice(symbol: string): AggregatedPrice | undefined {
-    // Try exact symbol first
-    let price = this.priceCache.get(symbol);
-    if (price) return price;
-
-    // If looking for /USDT, also check /USD (prefer real USD)
-    if (symbol.endsWith('/USDT')) {
-      const usdSymbol = symbol.replace('/USDT', '/USD');
-      price = this.priceCache.get(usdSymbol);
-      if (price) return price;
-    }
-
-    // If looking for /USD, also check /USDT as fallback
-    if (symbol.endsWith('/USD')) {
-      const usdtSymbol = symbol + 'T';
-      price = this.priceCache.get(usdtSymbol);
-      if (price) return price;
-    }
-
-    return undefined;
+    return this.priceCache.get(symbol);
   }
 
   getAllPrices(): AggregatedPrice[] {

@@ -87,6 +87,9 @@ export class BinanceStreamService implements IExchangeStream, OnModuleDestroy {
             symbol: this.normalizeSymbol(ticker.s),
             price: parseFloat(ticker.c),
             timestamp: new Date(ticker.E),
+            change24h: parseFloat(ticker.P),
+            high24h: parseFloat(ticker.h),
+            low24h: parseFloat(ticker.l),
           });
         }
       }
@@ -97,6 +100,9 @@ export class BinanceStreamService implements IExchangeStream, OnModuleDestroy {
           symbol: this.normalizeSymbol(parsed.s),
           price: parseFloat(parsed.c),
           timestamp: new Date(parsed.E),
+          change24h: parseFloat(parsed.P),
+          high24h: parseFloat(parsed.h),
+          low24h: parseFloat(parsed.l),
         });
       }
     } catch (error) {

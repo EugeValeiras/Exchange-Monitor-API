@@ -121,13 +121,23 @@ export class KrakenStreamService implements IExchangeStream, OnModuleDestroy {
 
         if (channelName === 'ticker' && tickerData?.c) {
           // c = close price [price, lot volume]
+          // o = opening price [today, last 24h]
+          // h = high [today, last 24h]
+          // l = low [today, last 24h]
           const price = parseFloat(tickerData.c[0]);
+          const openPrice24h = tickerData.o ? parseFloat(tickerData.o[1]) : 0;
+          const change24h = openPrice24h > 0
+            ? ((price - openPrice24h) / openPrice24h) * 100
+            : 0;
 
           this.emitPrice({
             exchange: 'kraken',
             symbol: this.fromKrakenPair(pair),
             price,
             timestamp: new Date(),
+            change24h,
+            high24h: tickerData.h ? parseFloat(tickerData.h[1]) : undefined,
+            low24h: tickerData.l ? parseFloat(tickerData.l[1]) : undefined,
           });
         }
       }
