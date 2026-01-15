@@ -16,6 +16,9 @@ import {
   PnlSummaryResponseDto,
   UnrealizedPnlResponseDto,
   RealizedPnlItemDto,
+  PaginatedRealizedPnlDto,
+  PaginatedCostBasisLotsDto,
+  PnlEvolutionDto,
 } from './dto/pnl-response.dto';
 import { TransactionDocument } from '../transactions/schemas/transaction.schema';
 import { TransactionType } from '../../common/constants/transaction-types.constant';
@@ -282,7 +285,216 @@ export class PnlService {
       realizedPnl: r.realizedPnl,
       realizedAt: r.realizedAt,
       exchange: r.exchange,
+      buyPrice: r.amount > 0 ? r.costBasis / r.amount : 0,
+      sellPrice: r.amount > 0 ? r.proceeds / r.amount : 0,
+      pnlPercent: r.costBasis > 0 ? (r.realizedPnl / r.costBasis) * 100 : 0,
+      holdingPeriod: r.holdingPeriod || 'short_term',
     }));
+  }
+
+  /**
+   * Get realized P&L with pagination and filters
+   */
+  async getRealizedPnlPaginated(
+    userId: string,
+    page: number = 1,
+    limit: number = 20,
+    startDate?: Date,
+    endDate?: Date,
+    assets?: string[],
+    exchanges?: string[],
+  ): Promise<PaginatedRealizedPnlDto> {
+    const query: Record<string, unknown> = {
+      userId: new Types.ObjectId(userId),
+    };
+
+    if (startDate || endDate) {
+      query.realizedAt = {};
+      if (startDate) {
+        (query.realizedAt as Record<string, Date>).$gte = startDate;
+      }
+      if (endDate) {
+        (query.realizedAt as Record<string, Date>).$lte = endDate;
+      }
+    }
+
+    if (assets && assets.length > 0) {
+      query.asset = { $in: assets };
+    }
+
+    if (exchanges && exchanges.length > 0) {
+      query.exchange = { $in: exchanges };
+    }
+
+    const total = await this.realizedPnlModel.countDocuments(query);
+    const totalPages = Math.ceil(total / limit);
+
+    const records = await this.realizedPnlModel
+      .find(query)
+      .sort({ realizedAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+
+    const data = records.map((r) => ({
+      id: r._id.toString(),
+      asset: r.asset,
+      amount: r.amount,
+      proceeds: r.proceeds,
+      costBasis: r.costBasis,
+      realizedPnl: r.realizedPnl,
+      realizedAt: r.realizedAt,
+      exchange: r.exchange,
+      buyPrice: r.amount > 0 ? r.costBasis / r.amount : 0,
+      sellPrice: r.amount > 0 ? r.proceeds / r.amount : 0,
+      pnlPercent: r.costBasis > 0 ? (r.realizedPnl / r.costBasis) * 100 : 0,
+      holdingPeriod: r.holdingPeriod || 'short_term',
+    }));
+
+    return { data, total, page, limit, totalPages };
+  }
+
+  /**
+   * Get cost basis lots with pagination and filters
+   */
+  async getCostBasisLots(
+    userId: string,
+    page: number = 1,
+    limit: number = 20,
+    assets?: string[],
+    exchanges?: string[],
+    showEmpty: boolean = false,
+  ): Promise<PaginatedCostBasisLotsDto> {
+    const query: Record<string, unknown> = {
+      userId: new Types.ObjectId(userId),
+    };
+
+    if (!showEmpty) {
+      query.remainingAmount = { $gt: 0 };
+    }
+
+    if (assets && assets.length > 0) {
+      query.asset = { $in: assets };
+    }
+
+    if (exchanges && exchanges.length > 0) {
+      query.exchange = { $in: exchanges };
+    }
+
+    const total = await this.costBasisLotModel.countDocuments(query);
+    const totalPages = Math.ceil(total / limit);
+
+    const lots = await this.costBasisLotModel
+      .find(query)
+      .sort({ acquiredAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+
+    const data = lots.map((lot) => ({
+      id: lot._id.toString(),
+      asset: lot.asset,
+      exchange: lot.exchange,
+      source: lot.source,
+      acquiredAt: lot.acquiredAt,
+      originalAmount: lot.originalAmount,
+      remainingAmount: lot.remainingAmount,
+      costPerUnit: lot.costPerUnit,
+      totalCost: lot.originalAmount * lot.costPerUnit,
+    }));
+
+    return { data, total, page, limit, totalPages };
+  }
+
+  /**
+   * Get P&L evolution data for chart
+   */
+  async getPnlEvolution(
+    userId: string,
+    timeframe: string = '1y',
+  ): Promise<PnlEvolutionDto> {
+    // Calculate date range based on timeframe
+    const now = new Date();
+    let startDate: Date;
+
+    switch (timeframe) {
+      case '1m':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+        break;
+      case '3m':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
+        break;
+      case '6m':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate());
+        break;
+      case '1y':
+        startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+        break;
+      case 'all':
+      default:
+        startDate = new Date(2020, 0, 1); // Far back enough
+        break;
+    }
+
+    // Get all realized P&L records in range, sorted by date
+    const records = await this.realizedPnlModel
+      .find({
+        userId: new Types.ObjectId(userId),
+        realizedAt: { $gte: startDate },
+      })
+      .sort({ realizedAt: 1 });
+
+    if (records.length === 0) {
+      return { labels: [], data: [], timeframe };
+    }
+
+    // Group by day and calculate cumulative P&L
+    const dailyPnl = new Map<string, number>();
+    let cumulative = 0;
+
+    // Get initial cumulative from records before start date
+    const priorRecords = await this.realizedPnlModel.find({
+      userId: new Types.ObjectId(userId),
+      realizedAt: { $lt: startDate },
+    });
+    cumulative = priorRecords.reduce((sum, r) => sum + r.realizedPnl, 0);
+
+    for (const record of records) {
+      const dateKey = record.realizedAt.toISOString().split('T')[0];
+      cumulative += record.realizedPnl;
+      dailyPnl.set(dateKey, cumulative);
+    }
+
+    // Convert to arrays
+    const sortedDates = Array.from(dailyPnl.keys()).sort();
+    const labels = sortedDates;
+    const data = sortedDates.map((date) => dailyPnl.get(date) || 0);
+
+    return { labels, data, timeframe };
+  }
+
+  /**
+   * Get available assets for filtering
+   */
+  async getAvailableAssets(userId: string): Promise<string[]> {
+    const assets = await this.realizedPnlModel.distinct('asset', {
+      userId: new Types.ObjectId(userId),
+    });
+    const lotAssets = await this.costBasisLotModel.distinct('asset', {
+      userId: new Types.ObjectId(userId),
+    });
+    return [...new Set([...assets, ...lotAssets])].sort();
+  }
+
+  /**
+   * Get available exchanges for filtering
+   */
+  async getAvailableExchanges(userId: string): Promise<string[]> {
+    const exchanges = await this.realizedPnlModel.distinct('exchange', {
+      userId: new Types.ObjectId(userId),
+    });
+    const lotExchanges = await this.costBasisLotModel.distinct('exchange', {
+      userId: new Types.ObjectId(userId),
+    });
+    return [...new Set([...exchanges, ...lotExchanges])].sort();
   }
 
   /**

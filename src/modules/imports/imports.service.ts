@@ -323,10 +323,23 @@ export class ImportsService {
     for (const record of records) {
       try {
         const externalId = `binance-deposit-${record.txid || record.time}`;
+        const timestamp = this.parseBinanceDate(record.time);
 
+        // Check for duplicates by externalId OR by matching fields
         const existing = await this.transactionModel.findOne({
-          externalId,
           credentialId: new Types.ObjectId(credentialId),
+          $or: [
+            { externalId },
+            {
+              type: TransactionType.DEPOSIT,
+              asset: record.coin,
+              amount: { $gte: record.amount - 0.00000001, $lte: record.amount + 0.00000001 },
+              timestamp: {
+                $gte: new Date(timestamp.getTime() - 60000),
+                $lte: new Date(timestamp.getTime() + 60000),
+              },
+            },
+          ],
         });
 
         if (existing) {
@@ -340,7 +353,7 @@ export class ImportsService {
             type: TransactionType.DEPOSIT,
             asset: record.coin,
             amount: record.amount,
-            timestamp: this.parseBinanceDate(record.time),
+            timestamp,
             rawData: record as unknown as Record<string, unknown>,
           });
           imported++;
@@ -386,10 +399,23 @@ export class ImportsService {
     for (const record of records) {
       try {
         const externalId = `binance-withdraw-${record.txid || record.time}`;
+        const timestamp = this.parseBinanceDate(record.time);
 
+        // Check for duplicates by externalId OR by matching fields
         const existing = await this.transactionModel.findOne({
-          externalId,
           credentialId: new Types.ObjectId(credentialId),
+          $or: [
+            { externalId },
+            {
+              type: TransactionType.WITHDRAWAL,
+              asset: record.coin,
+              amount: { $gte: record.amount - 0.00000001, $lte: record.amount + 0.00000001 },
+              timestamp: {
+                $gte: new Date(timestamp.getTime() - 60000),
+                $lte: new Date(timestamp.getTime() + 60000),
+              },
+            },
+          ],
         });
 
         if (existing) {
@@ -405,7 +431,7 @@ export class ImportsService {
             amount: record.amount,
             fee: record.fee || undefined,
             feeAsset: record.fee ? record.coin : undefined,
-            timestamp: this.parseBinanceDate(record.time),
+            timestamp,
             rawData: record as unknown as Record<string, unknown>,
           });
           imported++;
@@ -570,12 +596,26 @@ export class ImportsService {
     const priceAmount = Math.abs(sellRecord.change);
     const price = priceAmount / amount; // How much priceAsset per 1 asset
     const pair = `${asset}/${priceAsset}`;
+    const timestamp = this.parseBinanceDate(buyRecord.time);
 
     const externalId = `binance-trade-${buyRecord.time}-${asset}-${priceAsset}-${amount}`;
 
+    // Check for duplicates by externalId OR by matching fields
     const existing = await this.transactionModel.findOne({
-      externalId,
       credentialId: new Types.ObjectId(credentialId),
+      $or: [
+        { externalId },
+        {
+          type: TransactionType.TRADE,
+          asset,
+          amount: { $gte: amount - 0.00000001, $lte: amount + 0.00000001 },
+          pair,
+          timestamp: {
+            $gte: new Date(timestamp.getTime() - 60000), // 1 minute tolerance
+            $lte: new Date(timestamp.getTime() + 60000),
+          },
+        },
+      ],
     });
 
     if (existing) {
@@ -594,7 +634,7 @@ export class ImportsService {
       priceAsset,
       pair,
       side: 'buy',
-      timestamp: this.parseBinanceDate(buyRecord.time),
+      timestamp,
       rawData: {
         buyRecord,
         sellRecord,
@@ -626,10 +666,24 @@ export class ImportsService {
     }
 
     const externalId = `binance-tx-${record.time}-${record.coin}-${record.operation}-${record.change}`;
+    const timestamp = this.parseBinanceDate(record.time);
+    const amount = Math.abs(record.change);
 
+    // Check for duplicates by externalId OR by matching fields
     const existing = await this.transactionModel.findOne({
-      externalId,
       credentialId: new Types.ObjectId(credentialId),
+      $or: [
+        { externalId },
+        {
+          type: mappedType,
+          asset: record.coin,
+          amount: { $gte: amount - 0.00000001, $lte: amount + 0.00000001 },
+          timestamp: {
+            $gte: new Date(timestamp.getTime() - 60000), // 1 minute tolerance
+            $lte: new Date(timestamp.getTime() + 60000),
+          },
+        },
+      ],
     });
 
     if (existing) {
@@ -643,8 +697,8 @@ export class ImportsService {
       externalId,
       type: mappedType,
       asset: record.coin,
-      amount: Math.abs(record.change),
-      timestamp: this.parseBinanceDate(record.time),
+      amount,
+      timestamp,
       rawData: record as unknown as Record<string, unknown>,
     });
 
