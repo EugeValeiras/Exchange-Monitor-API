@@ -449,48 +449,68 @@ export class ImportsService {
     let skipped = 0;
     let errors = 0;
 
+    // Group records by timestamp to match trade pairs
+    const recordsByTime = new Map<string, BinanceTransactionRow[]>();
     for (const record of records) {
-      try {
-        // Skip internal transfers that don't affect external balance
-        if (this.isInternalBinanceTransfer(record.operation)) {
-          skipped++;
-          continue;
-        }
+      const existing = recordsByTime.get(record.time) || [];
+      existing.push(record);
+      recordsByTime.set(record.time, existing);
+    }
 
-        const mappedType = this.mapBinanceOperationType(record.operation, record.change);
+    // Process grouped records
+    for (const [time, groupedRecords] of recordsByTime) {
+      // Separate trade records from non-trade records
+      const tradeRecords = groupedRecords.filter(r => this.isBinanceTradeOperation(r.operation));
+      const nonTradeRecords = groupedRecords.filter(r => !this.isBinanceTradeOperation(r.operation));
 
-        // Skip if we can't determine the type
-        if (!mappedType) {
-          skipped++;
-          continue;
-        }
-
-        const externalId = `binance-tx-${record.time}-${record.coin}-${record.operation}-${record.change}`;
-
-        const existing = await this.transactionModel.findOne({
-          externalId,
-          credentialId: new Types.ObjectId(credentialId),
-        });
-
-        if (existing) {
-          skipped++;
-        } else {
-          await this.transactionModel.create({
-            userId: new Types.ObjectId(userId),
-            credentialId: new Types.ObjectId(credentialId),
+      // Process trades as pairs
+      if (tradeRecords.length >= 2) {
+        try {
+          const result = await this.processBinanceTradePair(
+            tradeRecords,
             exchange,
-            externalId,
-            type: mappedType,
-            asset: record.coin,
-            amount: Math.abs(record.change),
-            timestamp: this.parseBinanceDate(record.time),
-            rawData: record as unknown as Record<string, unknown>,
-          });
-          imported++;
+            credentialId,
+            userId,
+          );
+          imported += result.imported;
+          skipped += result.skipped;
+        } catch (error) {
+          this.logger.warn(`Failed to import trade pair at ${time}: ${error.message}`);
+          errors++;
         }
-      } catch (error) {
-        this.logger.warn(`Failed to import transaction: ${error.message}`);
-        errors++;
+      } else if (tradeRecords.length === 1) {
+        // Single trade record without pair - import as simple trade
+        const record = tradeRecords[0];
+        try {
+          const result = await this.importSimpleBinanceTransaction(
+            record,
+            exchange,
+            credentialId,
+            userId,
+          );
+          if (result === 'imported') imported++;
+          else if (result === 'skipped') skipped++;
+        } catch (error) {
+          this.logger.warn(`Failed to import single trade: ${error.message}`);
+          errors++;
+        }
+      }
+
+      // Process non-trade records individually
+      for (const record of nonTradeRecords) {
+        try {
+          const result = await this.importSimpleBinanceTransaction(
+            record,
+            exchange,
+            credentialId,
+            userId,
+          );
+          if (result === 'imported') imported++;
+          else if (result === 'skipped') skipped++;
+        } catch (error) {
+          this.logger.warn(`Failed to import transaction: ${error.message}`);
+          errors++;
+        }
       }
     }
 
@@ -499,6 +519,136 @@ export class ImportsService {
     );
 
     return { imported, skipped, errors };
+  }
+
+  /**
+   * Check if an operation is a trade operation
+   */
+  private isBinanceTradeOperation(operation: string): boolean {
+    const op = operation.toLowerCase();
+    return (
+      op === 'transaction buy' ||
+      op === 'transaction sold' ||
+      op === 'transaction spend' ||
+      op === 'transaction revenue' ||
+      op === 'binance convert' ||
+      op === 'small assets exchange bnb'
+    );
+  }
+
+  /**
+   * Process a pair of trade records (buy + sell) into a single trade transaction
+   */
+  private async processBinanceTradePair(
+    tradeRecords: BinanceTransactionRow[],
+    exchange: string,
+    credentialId: string,
+    userId: string,
+  ): Promise<{ imported: number; skipped: number }> {
+    // Find the buy side (positive change) and sell side (negative change)
+    const buyRecord = tradeRecords.find(r => r.change > 0);
+    const sellRecord = tradeRecords.find(r => r.change < 0);
+
+    if (!buyRecord || !sellRecord) {
+      // Can't determine pair, import individually
+      let imported = 0;
+      let skipped = 0;
+      for (const record of tradeRecords) {
+        const result = await this.importSimpleBinanceTransaction(record, exchange, credentialId, userId);
+        if (result === 'imported') imported++;
+        else if (result === 'skipped') skipped++;
+      }
+      return { imported, skipped };
+    }
+
+    // Create trade with full details
+    // The "asset" is what we bought (positive change)
+    // The "priceAsset" is what we paid with (negative change)
+    const asset = buyRecord.coin;
+    const amount = Math.abs(buyRecord.change);
+    const priceAsset = sellRecord.coin;
+    const priceAmount = Math.abs(sellRecord.change);
+    const price = priceAmount / amount; // How much priceAsset per 1 asset
+    const pair = `${asset}/${priceAsset}`;
+
+    const externalId = `binance-trade-${buyRecord.time}-${asset}-${priceAsset}-${amount}`;
+
+    const existing = await this.transactionModel.findOne({
+      externalId,
+      credentialId: new Types.ObjectId(credentialId),
+    });
+
+    if (existing) {
+      return { imported: 0, skipped: 1 };
+    }
+
+    await this.transactionModel.create({
+      userId: new Types.ObjectId(userId),
+      credentialId: new Types.ObjectId(credentialId),
+      exchange,
+      externalId,
+      type: TransactionType.TRADE,
+      asset,
+      amount,
+      price,
+      priceAsset,
+      pair,
+      side: 'buy',
+      timestamp: this.parseBinanceDate(buyRecord.time),
+      rawData: {
+        buyRecord,
+        sellRecord,
+      } as unknown as Record<string, unknown>,
+    });
+
+    return { imported: 1, skipped: 0 };
+  }
+
+  /**
+   * Import a simple (non-paired) Binance transaction
+   */
+  private async importSimpleBinanceTransaction(
+    record: BinanceTransactionRow,
+    exchange: string,
+    credentialId: string,
+    userId: string,
+  ): Promise<'imported' | 'skipped' | 'error'> {
+    // Skip internal transfers
+    if (this.isInternalBinanceTransfer(record.operation)) {
+      return 'skipped';
+    }
+
+    const mappedType = this.mapBinanceOperationType(record.operation, record.change);
+
+    // Skip if we can't determine the type
+    if (!mappedType) {
+      return 'skipped';
+    }
+
+    const externalId = `binance-tx-${record.time}-${record.coin}-${record.operation}-${record.change}`;
+
+    const existing = await this.transactionModel.findOne({
+      externalId,
+      credentialId: new Types.ObjectId(credentialId),
+    });
+
+    if (existing) {
+      return 'skipped';
+    }
+
+    await this.transactionModel.create({
+      userId: new Types.ObjectId(userId),
+      credentialId: new Types.ObjectId(credentialId),
+      exchange,
+      externalId,
+      type: mappedType,
+      asset: record.coin,
+      amount: Math.abs(record.change),
+      timestamp: this.parseBinanceDate(record.time),
+      rawData: record as unknown as Record<string, unknown>,
+    });
+
+    return 'imported';
   }
 
   // ==================== BINANCE PARSING HELPERS ====================
@@ -657,16 +807,20 @@ export class ImportsService {
       return TransactionType.WITHDRAWAL;
     }
 
-    // Trades (using change sign to determine buy/sell is tricky,
-    // but for balance calculation we treat them as trades)
+    // Merchant acquiring (receiving payment)
+    if (op === 'merchant acquiring') {
+      return TransactionType.DEPOSIT;
+    }
+
+    // Trades are handled separately by processBinanceTradePair
+    // This handles single trade records that weren't paired
     if (
       op === 'transaction buy' ||
       op === 'transaction sold' ||
       op === 'transaction spend' ||
       op === 'transaction revenue' ||
       op === 'binance convert' ||
-      op === 'small assets exchange bnb' ||
-      op === 'merchant acquiring'
+      op === 'small assets exchange bnb'
     ) {
       return TransactionType.TRADE;
     }
