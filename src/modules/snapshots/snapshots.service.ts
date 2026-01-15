@@ -301,22 +301,56 @@ export class SnapshotsService {
         ? new Date(Date.now() - 24 * 60 * 60 * 1000)
         : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    const snapshots = await this.hourlySnapshotModel
+    const rawSnapshots = await this.hourlySnapshotModel
       .find({
         userId: new Types.ObjectId(userId),
         timestamp: { $gte: since },
       })
       .sort({ timestamp: 1 });
 
-    // Collect all available assets from snapshots
+    // Collect all available assets from snapshots (before aggregation)
     const allAssets = new Set<string>();
-    snapshots.forEach((s) => {
+    rawSnapshots.forEach((s) => {
       s.assetBalances?.forEach((ab) => allAssets.add(ab.asset));
     });
 
     const availableAssets = Array.from(allAssets).sort();
     const filteredAssets =
       assets && assets.length > 0 ? assets : availableAssets;
+
+    // For 7d, aggregate snapshots every 6 hours if we have more than 24 points
+    // This keeps the chart clean and consistent with get7dChartData
+    interface AggregatedSnapshot {
+      timestamp: Date;
+      totalValueUsd: number;
+      assetBalances?: SnapshotAssetBalance[];
+    }
+
+    let snapshots: AggregatedSnapshot[];
+    if (timeframe === '7d' && rawSnapshots.length > 24) {
+      // Aggregate every 6 hours
+      snapshots = [];
+      for (let i = 0; i < rawSnapshots.length; i += 6) {
+        const chunk = rawSnapshots.slice(i, i + 6);
+        // Use the middle snapshot's data for timestamp and assetBalances
+        const middleSnapshot = chunk[Math.floor(chunk.length / 2)];
+        // Calculate average totalValueUsd
+        const avgTotalValue =
+          chunk.reduce((sum, s) => sum + s.totalValueUsd, 0) / chunk.length;
+
+        snapshots.push({
+          timestamp: middleSnapshot.timestamp,
+          totalValueUsd: avgTotalValue,
+          assetBalances: middleSnapshot.assetBalances,
+        });
+      }
+    } else {
+      snapshots = rawSnapshots.map((s) => ({
+        timestamp: s.timestamp,
+        totalValueUsd: s.totalValueUsd,
+        assetBalances: s.assetBalances,
+      }));
+    }
 
     // Build data per asset
     const assetData: AssetChartDataDto[] = filteredAssets.map((asset) => ({
