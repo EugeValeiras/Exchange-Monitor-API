@@ -318,39 +318,12 @@ export class SnapshotsService {
     const filteredAssets =
       assets && assets.length > 0 ? assets : availableAssets;
 
-    // For 7d, aggregate snapshots every 6 hours if we have more than 24 points
-    // This keeps the chart clean and consistent with get7dChartData
-    interface AggregatedSnapshot {
-      timestamp: Date;
-      totalValueUsd: number;
-      assetBalances?: SnapshotAssetBalance[];
-    }
-
-    let snapshots: AggregatedSnapshot[];
-    if (timeframe === '7d' && rawSnapshots.length > 24) {
-      // Aggregate every 6 hours
-      snapshots = [];
-      for (let i = 0; i < rawSnapshots.length; i += 6) {
-        const chunk = rawSnapshots.slice(i, i + 6);
-        // Use the middle snapshot's data for timestamp and assetBalances
-        const middleSnapshot = chunk[Math.floor(chunk.length / 2)];
-        // Calculate average totalValueUsd
-        const avgTotalValue =
-          chunk.reduce((sum, s) => sum + s.totalValueUsd, 0) / chunk.length;
-
-        snapshots.push({
-          timestamp: middleSnapshot.timestamp,
-          totalValueUsd: avgTotalValue,
-          assetBalances: middleSnapshot.assetBalances,
-        });
-      }
-    } else {
-      snapshots = rawSnapshots.map((s) => ({
-        timestamp: s.timestamp,
-        totalValueUsd: s.totalValueUsd,
-        assetBalances: s.assetBalances,
-      }));
-    }
+    // Show all hourly data points for better granularity
+    const snapshots = rawSnapshots.map((s) => ({
+      timestamp: s.timestamp,
+      totalValueUsd: s.totalValueUsd,
+      assetBalances: s.assetBalances,
+    }));
 
     // Build data per asset
     const assetData: AssetChartDataDto[] = filteredAssets.map((asset) => ({
@@ -411,16 +384,11 @@ export class SnapshotsService {
       })
       .sort({ timestamp: 1 });
 
-    // Only aggregate if we have enough data points (>24), otherwise show all
-    let data: { timestamp: Date; totalValueUsd: number }[];
-    if (snapshots.length > 24) {
-      data = this.aggregateSnapshots(snapshots, 6);
-    } else {
-      data = snapshots.map((s) => ({
-        timestamp: s.timestamp,
-        totalValueUsd: s.totalValueUsd,
-      }));
-    }
+    // Show all hourly data points for better granularity
+    const data = snapshots.map((s) => ({
+      timestamp: s.timestamp,
+      totalValueUsd: s.totalValueUsd,
+    }));
 
     return this.buildChartResponse(data, '7d');
   }
