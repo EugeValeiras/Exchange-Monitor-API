@@ -116,4 +116,47 @@ export class UsersService {
       isFavorite: !isFavorite,
     };
   }
+
+  // Push token methods
+  async addPushToken(userId: string | Types.ObjectId, token: string): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $addToSet: { pushTokens: token },
+    });
+  }
+
+  async removePushToken(userId: string | Types.ObjectId, token: string): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $pull: { pushTokens: token },
+    });
+  }
+
+  async findUsersWithFavoriteAsset(asset: string): Promise<UserDocument[]> {
+    const normalizedAsset = asset.toUpperCase();
+    return this.userModel.find({
+      isActive: true,
+      favoriteAssets: normalizedAsset,
+      'notificationSettings.enabled': true,
+      pushTokens: { $exists: true, $ne: [] },
+    });
+  }
+
+  async updateNotificationSettings(
+    userId: string | Types.ObjectId,
+    settings: {
+      enabled: boolean;
+      priceChangeThreshold: number;
+      quietHoursStart?: string;
+      quietHoursEnd?: string;
+    },
+  ): Promise<UserDocument> {
+    const user = await this.userModel.findByIdAndUpdate(
+      userId,
+      { $set: { notificationSettings: settings } },
+      { new: true },
+    );
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return user;
+  }
 }

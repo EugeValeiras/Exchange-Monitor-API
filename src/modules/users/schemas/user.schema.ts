@@ -28,6 +28,20 @@ export class User {
 
   @Prop({ type: [String], default: [] })
   favoriteAssets: string[];
+
+  @Prop({ type: [String], default: [] })
+  pushTokens: string[];
+
+  @Prop({
+    type: Object,
+    default: { enabled: false, priceChangeThreshold: 5 },
+  })
+  notificationSettings: {
+    enabled: boolean;
+    priceChangeThreshold: number;
+    quietHoursStart?: string;
+    quietHoursEnd?: string;
+  };
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

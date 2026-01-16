@@ -115,10 +115,10 @@ export class NexoManualAdapter extends BaseExchangeAdapter {
   }
 
   async fetchPrice(_symbol: string): Promise<IPrice> {
-    throw new Error('Price fetching not supported for Nexo Manual');
+    throw new Error('Price fetching not supported for Nexo');
   }
 
   async fetchPrices(_symbols: string[]): Promise<IPrice[]> {
-    throw new Error('Price fetching not supported for Nexo Manual');
+    throw new Error('Price fetching not supported for Nexo');
   }
 }

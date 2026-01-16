@@ -6,6 +6,7 @@ import { PricesGateway } from './websocket/prices.gateway';
 import { PriceAggregatorService } from './websocket/price-aggregator.service';
 import { BinanceStreamService } from './websocket/binance-stream.service';
 import { KrakenStreamService } from './websocket/kraken-stream.service';
+import { NexoStreamService } from './websocket/nexo-stream.service';
 import { ExchangeCredentialsModule } from '../exchange-credentials/exchange-credentials.module';
 import { SettingsModule } from '../settings/settings.module';
 import { ExchangesModule } from '../../integrations/exchanges/exchanges.module';

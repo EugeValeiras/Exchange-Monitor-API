@@ -10,4 +10,9 @@ export default () => ({
   encryption: {
     masterKey: process.env.ENCRYPTION_MASTER_KEY,
   },
+  firebase: {
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY,
+  },
 });

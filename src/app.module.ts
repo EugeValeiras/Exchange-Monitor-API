@@ -20,6 +20,7 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { PnlModule } from './modules/pnl/pnl.module';
 import { HealthModule } from './modules/health/health.module';
 import { JobsModule } from './jobs/jobs.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { JobsModule } from './jobs/jobs.module';
     SettingsModule,
     PnlModule,
     HealthModule,
+    NotificationsModule,
 
     // Jobs
     JobsModule,

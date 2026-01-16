@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit, Optional, Inject, forwardRef } from '
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { BinanceStreamService } from './binance-stream.service';
 import { KrakenStreamService } from './kraken-stream.service';
+import { NexoStreamService } from './nexo-stream.service';
 import { PriceUpdate, AggregatedPrice } from './exchange-stream.interface';
 import { SettingsService } from '../../settings/settings.service';
 
