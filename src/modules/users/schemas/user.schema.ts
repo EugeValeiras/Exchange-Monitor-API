@@ -25,6 +25,9 @@ export class User {
 
   @Prop()
   lastLoginAt?: Date;
+
+  @Prop({ type: [String], default: [] })
+  favoriteAssets: string[];
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

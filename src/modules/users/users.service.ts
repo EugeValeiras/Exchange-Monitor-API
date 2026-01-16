@@ -53,4 +53,67 @@ export class UsersService {
   async validatePassword(user: UserDocument, password: string): Promise<boolean> {
     return bcrypt.compare(password, user.passwordHash);
   }
+
+  // Favorites methods
+  async getFavorites(userId: string | Types.ObjectId): Promise<string[]> {
+    const user = await this.userModel.findById(userId);
+    return user?.favoriteAssets || [];
+  }
+
+  async updateFavorites(userId: string | Types.ObjectId, assets: string[]): Promise<string[]> {
+    const normalizedAssets = assets.map(a => a.toUpperCase());
+    const result = await this.userModel.findByIdAndUpdate(
+      userId,
+      { $set: { favoriteAssets: normalizedAssets } },
+      { new: true },
+    );
+    return result?.favoriteAssets || [];
+  }
+
+  async addFavorite(userId: string | Types.ObjectId, asset: string): Promise<string[]> {
+    const result = await this.userModel.findByIdAndUpdate(
+      userId,
+      { $addToSet: { favoriteAssets: asset.toUpperCase() } },
+      { new: true },
+    );
+    return result?.favoriteAssets || [];
+  }
+
+  async removeFavorite(userId: string | Types.ObjectId, asset: string): Promise<string[]> {
+    const result = await this.userModel.findByIdAndUpdate(
+      userId,
+      { $pull: { favoriteAssets: asset.toUpperCase() } },
+      { new: true },
+    );
+    return result?.favoriteAssets || [];
+  }
+
+  async toggleFavorite(
+    userId: string | Types.ObjectId,
+    asset: string,
+  ): Promise<{ favorites: string[]; isFavorite: boolean }> {
+    const user = await this.userModel.findById(userId);
+    const normalizedAsset = asset.toUpperCase();
+    const isFavorite = user?.favoriteAssets?.includes(normalizedAsset) || false;
+
+    let result: UserDocument | null;
+    if (isFavorite) {
+      result = await this.userModel.findByIdAndUpdate(
+        userId,
+        { $pull: { favoriteAssets: normalizedAsset } },
+        { new: true },
+      );
+    } else {
+      result = await this.userModel.findByIdAndUpdate(
+        userId,
+        { $addToSet: { favoriteAssets: normalizedAsset } },
+        { new: true },
+      );
+    }
+
+    return {
+      favorites: result?.favoriteAssets || [],
+      isFavorite: !isFavorite,
+    };
+  }
 }
