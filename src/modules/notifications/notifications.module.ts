@@ -8,6 +8,9 @@ import { ThresholdAlertService } from './threshold-alert.service';
 import { PriceBaseline, PriceBaselineSchema } from './schemas/price-baseline.schema';
 import { PriceThreshold, PriceThresholdSchema } from './schemas/price-threshold.schema';
 import { UsersModule } from '../users/users.module';
+import { BalancesModule } from '../balances/balances.module';
+import { SnapshotsModule } from '../snapshots/snapshots.module';
+import { PricesModule } from '../prices/prices.module';
 
 @Module({
   imports: [
@@ -16,6 +19,9 @@ import { UsersModule } from '../users/users.module';
       { name: PriceThreshold.name, schema: PriceThresholdSchema },
     ]),
     forwardRef(() => UsersModule),
+    BalancesModule,
+    SnapshotsModule,
+    PricesModule,
   ],
   controllers: [NotificationsController],
   providers: [

@@ -10,42 +10,28 @@ import {
 } from './schemas/price-threshold.schema';
 import { AggregatedPrice } from '../prices/websocket/exchange-stream.interface';
 
-interface ThresholdConfig {
-  step: number; // The price step for alerts (e.g., 1000 for BTC, 0.01 for NEXO)
-  formatPrice: (price: number) => string; // How to format the price in notifications
+interface AssetConfig {
+  formatPrice: (price: number) => string;
 }
 
 @Injectable()
 export class ThresholdAlertService implements OnModuleInit {
   private readonly logger = new Logger(ThresholdAlertService.name);
 
-  // Configuration for each asset
-  private readonly thresholdConfigs: Map<string, ThresholdConfig> = new Map([
-    [
-      'BTC',
-      {
-        step: 1000,
-        formatPrice: (p) => `$${p.toLocaleString('en-US', { maximumFractionDigits: 0 })}`,
-      },
-    ],
-    [
-      'NEXO',
-      {
-        step: 0.01,
-        formatPrice: (p) => `$${p.toFixed(2)}`,
-      },
-    ],
-    [
-      'MON',
-      {
-        step: 0.001,
-        formatPrice: (p) => `$${p.toFixed(3)}`,
-      },
-    ],
+  // Percentage change required to trigger alert (1% = 0.01)
+  private readonly alertPercentage = 0.01;
+
+  // Assets to track with their price formatting
+  private readonly trackedAssets: Map<string, AssetConfig> = new Map([
+    ['BTC', { formatPrice: (p) => `$${p.toLocaleString('en-US', { maximumFractionDigits: 0 })}` }],
+    ['ETH', { formatPrice: (p) => `$${p.toLocaleString('en-US', { maximumFractionDigits: 0 })}` }],
+    ['NEXO', { formatPrice: (p) => `$${p.toFixed(2)}` }],
+    ['MON', { formatPrice: (p) => `$${p.toFixed(4)}` }],
+    ['SOL', { formatPrice: (p) => `$${p.toFixed(2)}` }],
   ]);
 
-  // In-memory cache of last threshold levels
-  private lastThresholds = new Map<string, number>();
+  // In-memory cache of last notified prices
+  private lastNotifiedPrices = new Map<string, number>();
 
   constructor(
     @InjectModel(PriceThreshold.name)
@@ -55,20 +41,21 @@ export class ThresholdAlertService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.loadThresholdsFromDb();
+    await this.loadLastPricesFromDb();
   }
 
-  private async loadThresholdsFromDb(): Promise<void> {
+  private async loadLastPricesFromDb(): Promise<void> {
     try {
-      const thresholds = await this.priceThresholdModel.find().exec();
-      thresholds.forEach((threshold) => {
-        this.lastThresholds.set(threshold.asset, threshold.lastThresholdLevel);
+      const records = await this.priceThresholdModel.find().exec();
+      records.forEach((record) => {
+        // Use lastPrice as the last notified price
+        this.lastNotifiedPrices.set(record.asset, record.lastPrice);
       });
       this.logger.log(
-        `Loaded ${thresholds.length} price thresholds from database`,
+        `Loaded ${records.length} last notified prices from database`,
       );
     } catch (error) {
-      this.logger.error(`Failed to load thresholds: ${error.message}`);
+      this.logger.error(`Failed to load prices: ${error.message}`);
     }
   }
 
@@ -82,53 +69,52 @@ export class ThresholdAlertService implements OnModuleInit {
     const baseAsset = symbol.split('/')[0].toUpperCase();
     const currentPrice = priceData.price;
 
-    // Check if this asset has threshold config
-    const config = this.thresholdConfigs.get(baseAsset);
+    // Check if this asset is tracked
+    const config = this.trackedAssets.get(baseAsset);
     if (!config) {
-      return; // Not a tracked asset
+      return;
     }
 
-    // Calculate current threshold level
-    const currentThreshold = this.calculateThreshold(currentPrice, config.step);
-    const lastThreshold = this.lastThresholds.get(baseAsset);
+    const lastNotifiedPrice = this.lastNotifiedPrices.get(baseAsset);
 
-    // First time seeing this asset, just store the threshold
-    if (lastThreshold === undefined) {
-      await this.updateThreshold(baseAsset, currentThreshold, currentPrice);
+    // First time seeing this asset, initialize with current price
+    if (lastNotifiedPrice === undefined) {
+      await this.updateLastNotifiedPrice(baseAsset, currentPrice);
       this.logger.log(
-        `Initialized threshold for ${baseAsset}: ${config.formatPrice(currentThreshold)}`,
+        `Initialized price tracking for ${baseAsset}: ${config.formatPrice(currentPrice)}`,
       );
       return;
     }
 
-    // Check if threshold changed
-    if (currentThreshold !== lastThreshold) {
-      const direction = currentThreshold > lastThreshold ? 'up' : 'down';
+    // Calculate percentage change from last notified price
+    const percentageChange = Math.abs(currentPrice - lastNotifiedPrice) / lastNotifiedPrice;
+
+    // Check if change exceeds threshold
+    if (percentageChange >= this.alertPercentage) {
+      const direction = currentPrice > lastNotifiedPrice ? 'up' : 'down';
+      const changePercent = (percentageChange * 100).toFixed(2);
 
       this.logger.log(
-        `Threshold crossed for ${baseAsset}: ${config.formatPrice(lastThreshold)} -> ${config.formatPrice(currentThreshold)} (${direction})`,
+        `Price alert for ${baseAsset}: ${config.formatPrice(lastNotifiedPrice)} -> ${config.formatPrice(currentPrice)} (${direction} ${changePercent}%)`,
       );
 
       // Send alert to all users with push tokens
-      await this.sendThresholdAlert(
+      await this.sendPriceAlert(
         baseAsset,
-        currentThreshold,
+        currentPrice,
+        lastNotifiedPrice,
         direction,
+        percentageChange,
         config,
       );
 
-      // Update stored threshold
-      await this.updateThreshold(baseAsset, currentThreshold, currentPrice);
+      // Update last notified price
+      await this.updateLastNotifiedPrice(baseAsset, currentPrice);
     }
   }
 
-  private calculateThreshold(price: number, step: number): number {
-    return Math.floor(price / step) * step;
-  }
-
-  private async updateThreshold(
+  private async updateLastNotifiedPrice(
     asset: string,
-    thresholdLevel: number,
     price: number,
   ): Promise<void> {
     try {
@@ -136,30 +122,33 @@ export class ThresholdAlertService implements OnModuleInit {
         { asset },
         {
           asset,
-          lastThresholdLevel: thresholdLevel,
+          lastThresholdLevel: price, // Keeping field name for backwards compatibility
           lastPrice: price,
           timestamp: new Date(),
         },
         { upsert: true },
       );
-      this.lastThresholds.set(asset, thresholdLevel);
+      this.lastNotifiedPrices.set(asset, price);
     } catch (error) {
-      this.logger.error(`Failed to update threshold: ${error.message}`);
+      this.logger.error(`Failed to update last notified price: ${error.message}`);
     }
   }
 
-  private async sendThresholdAlert(
+  private async sendPriceAlert(
     asset: string,
-    threshold: number,
+    currentPrice: number,
+    lastPrice: number,
     direction: 'up' | 'down',
-    config: ThresholdConfig,
+    percentageChange: number,
+    config: AssetConfig,
   ): Promise<void> {
     const arrow = direction === 'up' ? '↑' : '↓';
     const emoji = direction === 'up' ? '📈' : '📉';
-    const verb = direction === 'up' ? 'subió' : 'bajó';
+    const changePercent = (percentageChange * 100).toFixed(1);
+    const sign = direction === 'up' ? '+' : '-';
 
-    const title = `${emoji} ${asset} ${arrow} ${config.formatPrice(threshold)}`;
-    const body = `${asset} ${verb} a ${config.formatPrice(threshold)}`;
+    const title = `${emoji} ${asset} ${arrow} ${config.formatPrice(currentPrice)}`;
+    const body = `${asset} ${sign}${changePercent}% (${config.formatPrice(lastPrice)} → ${config.formatPrice(currentPrice)})`;
 
     // Get all users with push tokens
     const allTokens = await this.notificationsService.getAllUserTokens();
@@ -170,7 +159,7 @@ export class ThresholdAlertService implements OnModuleInit {
     }
 
     this.logger.log(
-      `Sending threshold alert for ${asset} to ${allTokens.length} tokens`,
+      `Sending price alert for ${asset} to ${allTokens.length} tokens`,
     );
 
     const result = await this.firebaseService.sendMulticastNotification(
@@ -178,15 +167,17 @@ export class ThresholdAlertService implements OnModuleInit {
       title,
       body,
       {
-        type: 'threshold_alert',
+        type: 'price_alert',
         asset,
-        threshold: threshold.toString(),
+        price: currentPrice.toString(),
+        lastPrice: lastPrice.toString(),
         direction,
+        percentageChange: percentageChange.toString(),
       },
     );
 
     this.logger.log(
-      `Threshold alert sent: ${result.successCount}/${allTokens.length} successful`,
+      `Price alert sent: ${result.successCount}/${allTokens.length} successful`,
     );
   }
 }
