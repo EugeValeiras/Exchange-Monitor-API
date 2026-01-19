@@ -19,8 +19,8 @@ export class WidgetRefreshJob {
     this.logger.log('Starting widget refresh job...');
 
     try {
-      // Get all users
-      const users = await this.usersService.findAll();
+      // Get all users with push tokens
+      const users = await this.usersService.findUsersWithPushTokens();
 
       let totalTokens = 0;
       let totalSuccess = 0;

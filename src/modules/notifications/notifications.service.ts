@@ -23,6 +23,17 @@ export class NotificationsService {
     return user?.pushTokens ?? [];
   }
 
+  async getAllUserTokens(): Promise<string[]> {
+    const users = await this.usersService.findUsersWithPushTokens();
+    const allTokens: string[] = [];
+    users.forEach((user) => {
+      if (user.pushTokens && user.pushTokens.length > 0) {
+        allTokens.push(...user.pushTokens);
+      }
+    });
+    return allTokens;
+  }
+
   async getSettings(userId: string): Promise<NotificationSettingsDto> {
     const user = await this.usersService.findById(userId);
     return {
