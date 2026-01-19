@@ -22,7 +22,7 @@ import { ImportsService } from './imports.service';
 import { ImportResultDto } from './dto/import-result.dto';
 
 @ApiTags('Imports')
-@Controller('api/imports')
+@Controller('imports')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class ImportsController {

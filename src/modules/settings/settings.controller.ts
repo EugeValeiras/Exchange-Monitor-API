@@ -28,7 +28,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 
 @ApiTags('settings')
-@Controller('api/settings')
+@Controller('settings')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class SettingsController {

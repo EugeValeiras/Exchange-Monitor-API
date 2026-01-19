@@ -12,7 +12,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('prices')
-@Controller('api/prices')
+@Controller('prices')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class PricesController {

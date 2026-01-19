@@ -25,7 +25,7 @@ import {
 } from './dto/favorites.dto';
 
 @ApiTags('favorites')
-@Controller('api/favorites')
+@Controller('favorites')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class FavoritesController {

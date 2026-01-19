@@ -21,7 +21,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('pnl')
-@Controller('api/pnl')
+@Controller('pnl')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class PnlController {

@@ -21,7 +21,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('snapshots')
-@Controller('api/snapshots')
+@Controller('snapshots')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class SnapshotsController {
