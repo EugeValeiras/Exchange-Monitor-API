@@ -30,6 +30,9 @@ import {
 export class SnapshotsService {
   private readonly logger = new Logger(SnapshotsService.name);
 
+  // DEMO: Factor to divide all values (set to 1 for real values)
+  private readonly DEMO_FACTOR: number = 10;
+
   constructor(
     @InjectModel(DailySnapshot.name)
     private snapshotModel: Model<DailySnapshotDocument>,
@@ -275,10 +278,11 @@ export class SnapshotsService {
       })
       .sort({ timestamp: -1 });
 
-    // Get current balance
+    // Get current balance (already has DEMO_FACTOR applied from balancesService)
     const current = await this.balancesService.getConsolidatedBalances(userId);
     const currentValue = current.totalValueUsd;
-    const value24hAgo = snapshot?.totalValueUsd || currentValue;
+    // DEMO: Apply factor to snapshot value
+    const value24hAgo = (snapshot?.totalValueUsd || currentValue * this.DEMO_FACTOR) / this.DEMO_FACTOR;
 
     const changeUsd = currentValue - value24hAgo;
     const changePercent = value24hAgo > 0 ? (changeUsd / value24hAgo) * 100 : 0;
@@ -325,17 +329,17 @@ export class SnapshotsService {
       assetBalances: s.assetBalances,
     }));
 
-    // Build data per asset
+    // Build data per asset - DEMO: Apply factor
     const assetData: AssetChartDataDto[] = filteredAssets.map((asset) => ({
       asset,
       data: snapshots.map((s) => {
         const ab = s.assetBalances?.find((a) => a.asset === asset);
-        return ab?.valueUsd || 0;
+        return (ab?.valueUsd || 0) / this.DEMO_FACTOR;
       }),
     }));
 
-    // Build total data and calculate change
-    const totalData = snapshots.map((s) => s.totalValueUsd);
+    // Build total data and calculate change - DEMO: Apply factor
+    const totalData = snapshots.map((s) => s.totalValueUsd / this.DEMO_FACTOR);
     const labels = snapshots.map((s) => s.timestamp.toISOString());
 
     const firstValue = totalData[0] || 0;
@@ -488,7 +492,8 @@ export class SnapshotsService {
     }
 
     const labels = data.map((d) => d.timestamp.toISOString());
-    const values = data.map((d) => d.totalValueUsd);
+    // DEMO: Apply factor to values
+    const values = data.map((d) => d.totalValueUsd / this.DEMO_FACTOR);
 
     const firstValue = values[0] || 0;
     const lastValue = values[values.length - 1] || 0;

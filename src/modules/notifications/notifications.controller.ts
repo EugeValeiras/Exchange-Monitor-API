@@ -150,6 +150,9 @@ export class NotificationsController {
         totalBalance = cachedBalance.data.totalValueUsd;
       }
 
+      // DEMO: Divide balance by 10 to hide real amounts
+      totalBalance = totalBalance / 10;
+
       // Get 24h chart data from snapshots
       let change24hPercent = 0;
       let change24hUsd = 0;
@@ -161,8 +164,8 @@ export class NotificationsController {
           '24h',
         );
         change24hPercent = chartResponse.changePercent || 0;
-        change24hUsd = chartResponse.changeUsd || 0;
-        // Downsample to ~24 points for the widget chart
+        change24hUsd = chartResponse.changeUsd || 0; // Already /10 from SnapshotsService
+        // Downsample to ~24 points for the widget chart (already /10 from SnapshotsService)
         chartDataPoints = this.downsampleData(chartResponse.data, 24);
       } catch {
         // Chart data not available

@@ -26,6 +26,9 @@ export class BalancesService {
   private readonly logger = new Logger(BalancesService.name);
   private syncingUsers = new Set<string>(); // Track users currently syncing
 
+  // DEMO: Factor to divide all balances (set to 1 for real values)
+  private readonly DEMO_FACTOR: number = 10;
+
   constructor(
     @InjectModel(CachedBalance.name)
     private readonly cachedBalanceModel: Model<CachedBalanceDocument>,
@@ -104,21 +107,24 @@ export class BalancesService {
     try {
       const freshData = await this.fetchBalancesFromExchanges(userId);
 
-      // Save to cache
+      // Save to cache (save REAL values)
       await this.updateBalanceCache(userId, {
         byAsset: freshData.byAsset,
         byExchange: freshData.byExchange,
         totalValueUsd: freshData.totalValueUsd,
       });
 
+      // DEMO: Apply factor before emitting to WebSocket
+      const demoData = this.applyDemoFactor({
+        ...freshData,
+        isCached: false,
+        isSyncing: false,
+      });
+
       // Emit event for WebSocket
       this.eventEmitter.emit('balance.updated', {
         userId,
-        data: {
-          ...freshData,
-          isCached: false,
-          isSyncing: false,
-        },
+        data: demoData,
       });
 
       this.logger.log(`Balance synced for user ${userId}`);
@@ -127,6 +133,45 @@ export class BalancesService {
     } finally {
       this.syncingUsers.delete(userId);
     }
+  }
+
+  /**
+   * DEMO: Apply factor to hide real amounts
+   */
+  private applyDemoFactor(data: ConsolidatedBalanceDto): ConsolidatedBalanceDto {
+    if (this.DEMO_FACTOR === 1) return data;
+
+    // Clone to avoid mutating original
+    const result = JSON.parse(JSON.stringify(data)) as ConsolidatedBalanceDto;
+
+    // Apply factor to byAsset
+    for (const asset of result.byAsset) {
+      asset.free = asset.free / this.DEMO_FACTOR;
+      asset.locked = asset.locked / this.DEMO_FACTOR;
+      asset.total = asset.total / this.DEMO_FACTOR;
+      if (asset.valueUsd) asset.valueUsd = asset.valueUsd / this.DEMO_FACTOR;
+      if (asset.exchangeBreakdown) {
+        for (const eb of asset.exchangeBreakdown) {
+          eb.total = eb.total / this.DEMO_FACTOR;
+        }
+      }
+    }
+
+    // Apply factor to byExchange
+    for (const exchange of result.byExchange) {
+      exchange.totalValueUsd = exchange.totalValueUsd / this.DEMO_FACTOR;
+      for (const balance of exchange.balances) {
+        balance.free = balance.free / this.DEMO_FACTOR;
+        balance.locked = balance.locked / this.DEMO_FACTOR;
+        balance.total = balance.total / this.DEMO_FACTOR;
+        if (balance.valueUsd) balance.valueUsd = balance.valueUsd / this.DEMO_FACTOR;
+      }
+    }
+
+    // Apply factor to total
+    result.totalValueUsd = result.totalValueUsd / this.DEMO_FACTOR;
+
+    return result;
   }
 
   /**
@@ -143,31 +188,33 @@ export class BalancesService {
         this.logger.error(`Background sync failed: ${err.message}`),
       );
 
-      return {
+      // DEMO: Apply factor before returning
+      return this.applyDemoFactor({
         byAsset: cached.data.byAsset,
         byExchange: cached.data.byExchange,
         totalValueUsd: cached.data.totalValueUsd,
         lastUpdated: cached.lastSyncAt,
         isCached: true,
         isSyncing: true,
-      };
+      });
     }
 
     // 3. No cache - first time user, must wait for sync (no WebSocket event needed)
     const freshData = await this.fetchBalancesFromExchanges(userId);
 
-    // Save to cache for next time
+    // Save to cache for next time (save REAL values, not demo values)
     await this.updateBalanceCache(userId, {
       byAsset: freshData.byAsset,
       byExchange: freshData.byExchange,
       totalValueUsd: freshData.totalValueUsd,
     });
 
-    return {
+    // DEMO: Apply factor before returning
+    return this.applyDemoFactor({
       ...freshData,
       isCached: false,
       isSyncing: false,
-    };
+    });
   }
 
   /**
