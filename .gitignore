@@ -9,6 +9,9 @@ dist/
 .env.local
 .env.*.local
 
+# Firebase credentials
+firebase-service-account.json
+
 # IDE
 .idea/
 .vscode/

@@ -18,6 +18,11 @@ export class NotificationsService {
     this.logger.log(`Push token removed for user ${userId}`);
   }
 
+  async getUserTokens(userId: string): Promise<string[]> {
+    const user = await this.usersService.findById(userId);
+    return user?.pushTokens ?? [];
+  }
+
   async getSettings(userId: string): Promise<NotificationSettingsDto> {
     const user = await this.usersService.findById(userId);
     return {

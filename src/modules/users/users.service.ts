@@ -159,4 +159,11 @@ export class UsersService {
     }
     return user;
   }
+
+  async findUsersWithPushTokens(): Promise<UserDocument[]> {
+    return this.userModel.find({
+      isActive: true,
+      pushTokens: { $exists: true, $ne: [] },
+    });
+  }
 }
