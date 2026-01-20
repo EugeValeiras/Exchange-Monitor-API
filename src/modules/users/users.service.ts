@@ -2,11 +2,15 @@ import { Injectable, ConflictException, NotFoundException } from '@nestjs/common
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
-import { User, UserDocument } from './schemas/user.schema';
+import { User, UserDocument, PasskeyCredential } from './schemas/user.schema';
 import { CreateUserDto } from './dto/create-user.dto';
 
 @Injectable()
 export class UsersService {
+  // In-memory store for global challenges (for discoverable credentials)
+  // In production, use Redis for multi-instance deployments
+  private globalChallenges = new Map<string, { challenge: string; expiresAt: Date }>();
+
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
   ) {}
@@ -165,5 +169,95 @@ export class UsersService {
       isActive: true,
       pushTokens: { $exists: true, $ne: [] },
     });
+  }
+
+  // Passkey challenge methods
+  async setPasskeyChallenge(
+    userId: string | Types.ObjectId,
+    challenge: string,
+    expiresAt: Date,
+  ): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $set: { currentChallenge: challenge, challengeExpiresAt: expiresAt },
+    });
+  }
+
+  async clearPasskeyChallenge(userId: string | Types.ObjectId): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $unset: { currentChallenge: 1, challengeExpiresAt: 1 },
+    });
+  }
+
+  // Passkey credential methods
+  async addPasskeyCredential(
+    userId: string | Types.ObjectId,
+    credential: PasskeyCredential,
+  ): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $push: { passkeys: credential },
+    });
+  }
+
+  async updatePasskeyCredential(
+    userId: string | Types.ObjectId,
+    credentialId: string,
+    updates: Partial<Pick<PasskeyCredential, 'counter' | 'lastUsedAt'>>,
+  ): Promise<void> {
+    const updateFields: Record<string, any> = {};
+    if (updates.counter !== undefined) {
+      updateFields['passkeys.$.counter'] = updates.counter;
+    }
+    if (updates.lastUsedAt !== undefined) {
+      updateFields['passkeys.$.lastUsedAt'] = updates.lastUsedAt;
+    }
+
+    await this.userModel.findOneAndUpdate(
+      { _id: userId, 'passkeys.credentialId': credentialId },
+      { $set: updateFields },
+    );
+  }
+
+  async removePasskeyCredential(
+    userId: string | Types.ObjectId,
+    credentialId: string,
+  ): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $pull: { passkeys: { credentialId } },
+    });
+  }
+
+  // Find user by passkey credential ID (for discoverable credentials)
+  async findByPasskeyCredentialId(credentialId: string): Promise<UserDocument | null> {
+    return this.userModel.findOne({
+      'passkeys.credentialId': credentialId,
+    });
+  }
+
+  // Global challenge methods (for discoverable credentials without email)
+  async storeGlobalChallenge(challenge: string, expiresAt: Date): Promise<void> {
+    // Clean up expired challenges
+    const now = new Date();
+    for (const [key, value] of this.globalChallenges.entries()) {
+      if (value.expiresAt < now) {
+        this.globalChallenges.delete(key);
+      }
+    }
+    // Store new challenge
+    this.globalChallenges.set(challenge, { challenge, expiresAt });
+  }
+
+  async getGlobalChallenge(): Promise<{ challenge: string; expiresAt: Date } | null> {
+    // Return the most recent valid challenge
+    const now = new Date();
+    for (const [, value] of this.globalChallenges.entries()) {
+      if (value.expiresAt > now) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  async clearGlobalChallenge(): Promise<void> {
+    this.globalChallenges.clear();
   }
 }

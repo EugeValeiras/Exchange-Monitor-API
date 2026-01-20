@@ -3,6 +3,16 @@ import { Document } from 'mongoose';
 
 export type UserDocument = User & Document;
 
+export class PasskeyCredential {
+  credentialId: string;      // Base64URL encoded
+  publicKey: string;         // Base64URL encoded
+  counter: number;           // Anti-replay counter
+  transports: string[];      // ['internal', 'hybrid', etc.]
+  deviceName?: string;       // e.g., "iPhone 15"
+  createdAt: Date;
+  lastUsedAt?: Date;
+}
+
 @Schema({ timestamps: true, collection: 'users' })
 export class User {
   @Prop({ required: true, unique: true, lowercase: true, trim: true })
@@ -42,6 +52,15 @@ export class User {
     quietHoursStart?: string;
     quietHoursEnd?: string;
   };
+
+  @Prop({ type: [Object], default: [] })
+  passkeys: PasskeyCredential[];
+
+  @Prop()
+  currentChallenge?: string;
+
+  @Prop()
+  challengeExpiresAt?: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

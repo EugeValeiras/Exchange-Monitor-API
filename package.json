@@ -32,6 +32,8 @@
     "@nestjs/schedule": "^6.1.0",
     "@nestjs/swagger": "^7.4.2",
     "@nestjs/websockets": "^10.4.22",
+    "@simplewebauthn/server": "^9.0.3",
+    "@simplewebauthn/types": "^12.0.0",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
     "ccxt": "^4.5.32",
