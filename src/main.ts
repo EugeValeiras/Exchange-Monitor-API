@@ -7,8 +7,10 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Global API prefix
-  app.setGlobalPrefix('api');
+  // Global API prefix (exclude .well-known for passkeys)
+  app.setGlobalPrefix('api', {
+    exclude: ['.well-known/(.*)'],
+  });
 
   // Enable CORS for mobile app
   app.enableCors({
