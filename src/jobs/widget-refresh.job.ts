@@ -10,6 +10,9 @@ import { PriceAggregatorService } from '../modules/prices/websocket/price-aggreg
 @Injectable()
 export class WidgetRefreshJob {
   private readonly logger = new Logger(WidgetRefreshJob.name);
+  private readonly BALANCE_CHANGE_NOTIFICATION_THRESHOLD = 1000; // USD - for visible push notification
+  private readonly WIDGET_UPDATE_THRESHOLD_PERCENT = 0.1; // % - for silent widget refresh
+  private previousBalances: Map<string, number> = new Map();
 
   constructor(
     private readonly firebaseService: FirebaseService,
@@ -39,16 +42,36 @@ export class WidgetRefreshJob {
 
         // Get widget data for this user
         const widgetData = await this.getWidgetDataForUser(user.id);
+        const currentBalance = (widgetData as any).totalBalance || 0;
+        const previousBalance = this.previousBalances.get(user.id);
 
-        const result = await this.firebaseService.sendSilentPushMulticast(
+        // Check for significant balance change (visible notification)
+        await this.checkAndNotifyBalanceChange(
+          user.id,
           tokens,
-          {
-            action: 'refresh_widget',
-            widgetData: JSON.stringify(widgetData),
-          },
+          currentBalance,
         );
 
-        totalSuccess += result.successCount;
+        // Only send silent widget update if balance changed by at least 0.1%
+        const shouldUpdateWidget = this.shouldSendWidgetUpdate(
+          previousBalance,
+          currentBalance,
+        );
+
+        if (shouldUpdateWidget) {
+          const result = await this.firebaseService.sendSilentPushMulticast(
+            tokens,
+            {
+              action: 'refresh_widget',
+              widgetData: JSON.stringify(widgetData),
+            },
+          );
+          totalSuccess += result.successCount;
+        } else {
+          this.logger.debug(
+            `Skipping widget update for user ${user.id}: balance unchanged (${currentBalance.toFixed(2)})`,
+          );
+        }
       }
 
       this.logger.log(
@@ -222,5 +245,78 @@ export class WidgetRefreshJob {
       MON: 'Monad',
     };
     return names[symbol] || symbol;
+  }
+
+  private shouldSendWidgetUpdate(
+    previousBalance: number | undefined,
+    currentBalance: number,
+  ): boolean {
+    // Always send on first run (no previous balance)
+    if (previousBalance === undefined) {
+      return true;
+    }
+
+    // Avoid division by zero
+    if (previousBalance === 0) {
+      return currentBalance > 0;
+    }
+
+    const percentChange = Math.abs(
+      ((currentBalance - previousBalance) / previousBalance) * 100,
+    );
+
+    return percentChange >= this.WIDGET_UPDATE_THRESHOLD_PERCENT;
+  }
+
+  private async checkAndNotifyBalanceChange(
+    userId: string,
+    tokens: string[],
+    currentBalance: number,
+  ): Promise<void> {
+    const previousBalance = this.previousBalances.get(userId);
+
+    // Store current balance for next comparison
+    this.previousBalances.set(userId, currentBalance);
+
+    // Skip if no previous balance (first run for this user)
+    if (previousBalance === undefined) {
+      this.logger.debug(
+        `First balance recorded for user ${userId}: $${currentBalance.toFixed(2)}`,
+      );
+      return;
+    }
+
+    const balanceChange = currentBalance - previousBalance;
+    const absChange = Math.abs(balanceChange);
+
+    // Check if change exceeds threshold
+    if (absChange >= this.BALANCE_CHANGE_NOTIFICATION_THRESHOLD) {
+      const direction = balanceChange > 0 ? 'increased' : 'decreased';
+      const emoji = balanceChange > 0 ? '📈' : '📉';
+      const sign = balanceChange > 0 ? '+' : '';
+      const percentChange = previousBalance > 0
+        ? ((balanceChange / previousBalance) * 100).toFixed(2)
+        : '0.00';
+
+      const title = `${emoji} Portfolio ${direction}`;
+      const body = `${sign}$${absChange.toFixed(2)} (${sign}${percentChange}%) • Now: $${currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+      this.logger.log(
+        `Balance change alert for user ${userId}: ${sign}$${absChange.toFixed(2)} (${sign}${percentChange}%) - Now: $${currentBalance.toFixed(2)}`,
+      );
+
+      await this.firebaseService.sendMulticastNotification(
+        tokens,
+        title,
+        body,
+        {
+          action: 'balance_change',
+          change: balanceChange.toFixed(2),
+          changePercent: percentChange,
+          previousBalance: previousBalance.toFixed(2),
+          currentBalance: currentBalance.toFixed(2),
+        },
+      );
+    }
   }
 }
