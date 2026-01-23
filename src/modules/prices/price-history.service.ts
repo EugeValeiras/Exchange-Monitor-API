@@ -206,6 +206,98 @@ export class PriceHistoryService {
   }
 
   /**
+   * Get historical price for an asset at a specific date.
+   * Used by P&L recalculation to use local price history data.
+   * Searches for the closest price within 24 hours of the requested date.
+   *
+   * @param asset - The base asset (e.g., 'BTC')
+   * @param date - The date to get the price for
+   * @returns The price or null if not found
+   */
+  async getHistoricalPriceForAsset(
+    asset: string,
+    date: Date,
+  ): Promise<number | null> {
+    // Build possible symbols for this asset (USDT and USD pairs)
+    const symbols = [`${asset}/USDT`, `${asset}/USD`, `${asset}/USDT:USDT`];
+
+    // Search within a 24-hour window around the target date
+    const searchStart = new Date(date.getTime() - 12 * 60 * 60 * 1000);
+    const searchEnd = new Date(date.getTime() + 12 * 60 * 60 * 1000);
+
+    for (const symbol of symbols) {
+      // First try to find price closest to the target date
+      const price = await this.priceHistoryModel
+        .findOne({
+          symbol,
+          timestamp: { $gte: searchStart, $lte: searchEnd },
+        })
+        .sort({ timestamp: -1 })
+        .lean()
+        .exec();
+
+      if (price && price.price > 0) {
+        this.logger.debug(
+          `Found local price for ${asset} at ${date.toISOString()}: $${price.price} (symbol: ${symbol})`,
+        );
+        return price.price;
+      }
+    }
+
+    // If no price found in the window, try to get the most recent price before the date
+    for (const symbol of symbols) {
+      const price = await this.priceHistoryModel
+        .findOne({
+          symbol,
+          timestamp: { $lte: date },
+        })
+        .sort({ timestamp: -1 })
+        .lean()
+        .exec();
+
+      if (price && price.price > 0) {
+        const hoursDiff =
+          (date.getTime() - price.timestamp.getTime()) / (1000 * 60 * 60);
+
+        // Only use if within 24 hours
+        if (hoursDiff <= 24) {
+          this.logger.debug(
+            `Found local price for ${asset} at ${date.toISOString()}: $${price.price} (${hoursDiff.toFixed(1)}h before, symbol: ${symbol})`,
+          );
+          return price.price;
+        }
+      }
+    }
+
+    this.logger.debug(
+      `No local price history found for ${asset} at ${date.toISOString()}`,
+    );
+    return null;
+  }
+
+  /**
+   * Get historical prices for multiple assets at a specific date.
+   * Used by P&L recalculation to use local price history data.
+   *
+   * @param assets - Array of base assets (e.g., ['BTC', 'ETH'])
+   * @param date - The date to get prices for
+   * @returns Map of asset to price (0 if not found)
+   */
+  async getHistoricalPricesMap(
+    assets: string[],
+    date: Date,
+  ): Promise<Record<string, number>> {
+    const pricesMap: Record<string, number> = {};
+
+    for (const asset of assets) {
+      const price = await this.getHistoricalPriceForAsset(asset, date);
+      pricesMap[asset] = price ?? 0;
+    }
+
+    return pricesMap;
+  }
+
+  /**
    * Calculate the start date based on timeframe
    */
   private getFromDate(timeframe: TimeframeEnum): Date {
@@ -224,6 +316,10 @@ export class PriceHistoryService {
         return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       case TimeframeEnum.DAY_30:
         return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      case TimeframeEnum.DAY_90:
+        return new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      case TimeframeEnum.DAY_180:
+        return new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
       default:
         return new Date(now.getTime() - 24 * 60 * 60 * 1000);
     }

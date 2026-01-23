@@ -9,6 +9,8 @@ export enum TimeframeEnum {
   HOUR_24 = '24h',
   DAY_7 = '7d',
   DAY_30 = '30d',
+  DAY_90 = '90d',
+  DAY_180 = '180d',
 }
 
 export class PriceHistoryQueryDto {

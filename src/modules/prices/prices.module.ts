@@ -9,6 +9,7 @@ import { PriceHistoryInitializerService } from './price-history-initializer.serv
 import { PricesGateway } from './websocket/prices.gateway';
 import { PriceAggregatorService } from './websocket/price-aggregator.service';
 import { BinanceStreamService } from './websocket/binance-stream.service';
+import { BinanceFuturesStreamService } from './websocket/binance-futures-stream.service';
 import { KrakenStreamService } from './websocket/kraken-stream.service';
 import { NexoStreamService } from './websocket/nexo-stream.service';
 import { ExchangeCredentialsModule } from '../exchange-credentials/exchange-credentials.module';
@@ -37,6 +38,7 @@ import {
     PricesGateway,
     PriceAggregatorService,
     BinanceStreamService,
+    BinanceFuturesStreamService,
     KrakenStreamService,
   ],
   exports: [

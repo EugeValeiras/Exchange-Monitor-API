@@ -32,5 +32,5 @@ PriceHistorySchema.index(
   { unique: true },
 );
 
-// TTL index: 30 days retention (2592000 seconds)
-PriceHistorySchema.index({ timestamp: 1 }, { expireAfterSeconds: 2592000 });
+// TTL index: 180 days retention (15552000 seconds)
+PriceHistorySchema.index({ timestamp: 1 }, { expireAfterSeconds: 15552000 });

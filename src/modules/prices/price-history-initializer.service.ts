@@ -79,13 +79,27 @@ export class PriceHistoryInitializerService {
     const symbolsByExchange =
       await this.settingsService.getAllConfiguredSymbolsByExchange();
 
-    // Process Binance symbols
+    // Process Binance symbols - separate spot from futures
     if (symbolsByExchange['binance']?.length > 0) {
-      const binanceResults = await this.initializeBinanceData(
-        symbolsByExchange['binance'],
-        daysToFetch,
-      );
-      results.push(...binanceResults);
+      const allBinanceSymbols = symbolsByExchange['binance'];
+      const spotSymbols = allBinanceSymbols.filter((s) => !s.includes(':USDT'));
+      const futuresSymbols = allBinanceSymbols.filter((s) => s.includes(':USDT'));
+
+      if (spotSymbols.length > 0) {
+        const spotResults = await this.initializeBinanceData(
+          spotSymbols,
+          daysToFetch,
+        );
+        results.push(...spotResults);
+      }
+
+      if (futuresSymbols.length > 0) {
+        const futuresResults = await this.initializeBinanceFuturesData(
+          futuresSymbols,
+          daysToFetch,
+        );
+        results.push(...futuresResults);
+      }
     }
 
     // Process Kraken symbols
@@ -151,6 +165,100 @@ export class PriceHistoryInitializerService {
     }
 
     return results;
+  }
+
+  /**
+   * Fetch and store historical data from Binance Futures
+   */
+  private async initializeBinanceFuturesData(
+    symbols: string[],
+    days: number,
+  ): Promise<InitializationResult[]> {
+    const results: InitializationResult[] = [];
+    const endTime = Date.now();
+    const startTime = endTime - days * 24 * 60 * 60 * 1000;
+
+    for (const symbol of symbols) {
+      try {
+        const result = await this.fetchBinanceFuturesKlines(
+          symbol,
+          startTime,
+          endTime,
+        );
+        results.push(result);
+
+        // Rate limiting: wait 100ms between requests
+        await this.delay(100);
+      } catch (error) {
+        this.logger.error(
+          `Failed to fetch Binance Futures data for ${symbol}: ${error.message}`,
+        );
+        results.push({
+          exchange: 'binance-futures',
+          symbol,
+          inserted: 0,
+          skipped: 0,
+          error: error.message,
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Fetch klines from Binance Futures API and store in database
+   */
+  private async fetchBinanceFuturesKlines(
+    symbol: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<InitializationResult> {
+    // Convert symbol format: MON/USDT:USDT -> MONUSDT
+    const futuresSymbol = symbol.replace(':USDT', '').replace('/', '');
+
+    const allKlines: BinanceKline[] = [];
+    let currentStart = startTime;
+
+    while (currentStart < endTime) {
+      const url = new URL('https://fapi.binance.com/fapi/v1/klines');
+      url.searchParams.set('symbol', futuresSymbol);
+      url.searchParams.set('interval', this.BINANCE_INTERVAL);
+      url.searchParams.set('startTime', currentStart.toString());
+      url.searchParams.set('endTime', endTime.toString());
+      url.searchParams.set('limit', '1000');
+
+      const response = await fetch(url.toString());
+
+      if (!response.ok) {
+        throw new Error(`Binance Futures API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (!Array.isArray(data) || data.length === 0) {
+        break;
+      }
+
+      const klines: BinanceKline[] = data.map((k: unknown[]) => ({
+        openTime: k[0] as number,
+        open: k[1] as string,
+        high: k[2] as string,
+        low: k[3] as string,
+        close: k[4] as string,
+        volume: k[5] as string,
+        closeTime: k[6] as number,
+      }));
+
+      allKlines.push(...klines);
+
+      const lastKline = klines[klines.length - 1];
+      currentStart = lastKline.closeTime + 1;
+
+      await this.delay(50);
+    }
+
+    return this.storeKlines(symbol, 'binance-futures', allKlines);
   }
 
   /**

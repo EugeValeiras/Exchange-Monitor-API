@@ -12,6 +12,7 @@ import {
   LotBreakdown,
 } from './schemas/realized-pnl.schema';
 import { PricesService } from '../prices/prices.service';
+import { PriceHistoryService } from '../prices/price-history.service';
 import {
   PnlSummaryResponseDto,
   UnrealizedPnlResponseDto,
@@ -34,6 +35,7 @@ export class PnlService {
     @InjectModel(RealizedPnl.name)
     private realizedPnlModel: Model<RealizedPnlDocument>,
     private readonly pricesService: PricesService,
+    private readonly priceHistoryService: PriceHistoryService,
     @Inject(forwardRef(() => TransactionsService))
     private readonly transactionsService: TransactionsService,
   ) {}
@@ -82,20 +84,41 @@ export class PnlService {
   }
 
   /**
-   * Get historical price for an asset at a specific date
-   * Uses cached prices when available, falls back to API
+   * Get historical price for an asset at a specific date.
+   * First tries local price history database, then falls back to external API.
    */
   private async getHistoricalPriceForTransaction(
     asset: string,
     date: Date,
   ): Promise<number> {
+    // First try local price history (fast, no API calls)
     try {
-      const pricesMap = await this.pricesService.getHistoricalPricesMap([asset], date);
+      const localPrice =
+        await this.priceHistoryService.getHistoricalPriceForAsset(asset, date);
+
+      if (localPrice !== null && localPrice > 0) {
+        this.logger.debug(
+          `[Local] Historical price for ${asset} on ${date.toISOString().split('T')[0]}: $${localPrice}`,
+        );
+        return localPrice;
+      }
+    } catch (error) {
+      this.logger.debug(
+        `Failed to get local price history for ${asset}: ${error.message}`,
+      );
+    }
+
+    // Fall back to external API
+    try {
+      const pricesMap = await this.pricesService.getHistoricalPricesMap(
+        [asset],
+        date,
+      );
       const price = pricesMap[asset] || 0;
 
       if (price > 0) {
         this.logger.debug(
-          `Historical price for ${asset} on ${date.toISOString().split('T')[0]}: $${price}`,
+          `[API] Historical price for ${asset} on ${date.toISOString().split('T')[0]}: $${price}`,
         );
       } else {
         this.logger.warn(

@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit, Optional, Inject, forwardRef } from '@nestjs/common';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { BinanceStreamService } from './binance-stream.service';
+import { BinanceFuturesStreamService } from './binance-futures-stream.service';
 import { KrakenStreamService } from './kraken-stream.service';
 import { NexoStreamService } from './nexo-stream.service';
 import { PriceUpdate, AggregatedPrice } from './exchange-stream.interface';
@@ -30,6 +31,7 @@ export class PriceAggregatorService implements OnModuleInit {
 
   constructor(
     private readonly binanceStream: BinanceStreamService,
+    private readonly binanceFuturesStream: BinanceFuturesStreamService,
     private readonly krakenStream: KrakenStreamService,
     private readonly eventEmitter: EventEmitter2,
     @Optional() @Inject(forwardRef(() => SettingsService))
@@ -49,6 +51,7 @@ export class PriceAggregatorService implements OnModuleInit {
 
   private setupPriceHandlers(): void {
     this.binanceStream.onPrice((price) => this.handlePriceUpdate(price));
+    this.binanceFuturesStream.onPrice((price) => this.handlePriceUpdate(price));
     this.krakenStream.onPrice((price) => this.handlePriceUpdate(price));
   }
 
@@ -63,13 +66,15 @@ export class PriceAggregatorService implements OnModuleInit {
       // Subscribe to symbols
       this.subscribeToSymbolsInternal(symbolsByExchange);
 
-      // Connect to both streams
+      // Connect to all streams
       await Promise.allSettled([
         this.binanceStream.connect(),
+        this.binanceFuturesStream.connect(),
         this.krakenStream.connect(),
       ]).then((results) => {
+        const exchanges = ['Binance', 'Binance Futures', 'Kraken'];
         results.forEach((result, index) => {
-          const exchange = index === 0 ? 'Binance' : 'Kraken';
+          const exchange = exchanges[index];
           if (result.status === 'fulfilled') {
             this.logger.log(`${exchange} stream connected`);
           } else {
@@ -123,10 +128,19 @@ export class PriceAggregatorService implements OnModuleInit {
     this.priceCache.clear();
 
     // Subscribe Binance to its configured symbols
+    // Separate spot symbols from futures symbols (futures have :USDT suffix)
     const binanceSymbols = symbolsByExchange['binance'] || [];
-    if (binanceSymbols.length > 0) {
-      this.binanceStream.setSubscriptions(binanceSymbols);
-      this.logger.log(`[Subscribe] Binance (${binanceSymbols.length}): ${binanceSymbols.join(', ')}`);
+    const binanceSpotSymbols = binanceSymbols.filter((s) => !s.includes(':USDT'));
+    const binanceFuturesSymbols = binanceSymbols.filter((s) => s.includes(':USDT'));
+
+    if (binanceSpotSymbols.length > 0) {
+      this.binanceStream.setSubscriptions(binanceSpotSymbols);
+      this.logger.log(`[Subscribe] Binance Spot (${binanceSpotSymbols.length}): ${binanceSpotSymbols.join(', ')}`);
+    }
+
+    if (binanceFuturesSymbols.length > 0) {
+      this.binanceFuturesStream.setSubscriptions(binanceFuturesSymbols);
+      this.logger.log(`[Subscribe] Binance Futures (${binanceFuturesSymbols.length}): ${binanceFuturesSymbols.join(', ')}`);
     }
 
     // Subscribe Kraken to its configured symbols
@@ -249,9 +263,10 @@ export class PriceAggregatorService implements OnModuleInit {
     this.logger.debug(`Client requested symbols (already configured): ${configuredSymbols.join(', ')}`);
   }
 
-  getConnectionStatus(): { binance: boolean; kraken: boolean } {
+  getConnectionStatus(): { binance: boolean; binanceFutures: boolean; kraken: boolean } {
     return {
       binance: this.binanceStream.isConnected(),
+      binanceFutures: this.binanceFuturesStream.isConnected(),
       kraken: this.krakenStream.isConnected(),
     };
   }
