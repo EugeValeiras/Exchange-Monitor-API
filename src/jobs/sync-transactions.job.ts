@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { TransactionsService } from '../modules/transactions/transactions.service';
 import { ExchangeCredentialsService } from '../modules/exchange-credentials/exchange-credentials.service';
@@ -10,13 +11,24 @@ export class SyncTransactionsJob {
   constructor(
     private readonly transactionsService: TransactionsService,
     private readonly credentialsService: ExchangeCredentialsService,
+    private readonly configService: ConfigService,
   ) {}
+
+  private isEnabled(): boolean {
+    const globalEnabled = this.configService.get<boolean>('crons.enabled', true);
+    const jobEnabled = this.configService.get<boolean>('crons.syncTransactions', true);
+    return globalEnabled && jobEnabled;
+  }
 
   @Cron('0 */6 * * *', {
     name: 'sync-transactions',
     timeZone: 'UTC',
   })
   async handleTransactionSync(): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Transaction sync job is disabled');
+      return;
+    }
     this.logger.log('Starting transaction sync job...');
 
     try {

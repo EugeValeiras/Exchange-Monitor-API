@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { FirebaseService } from '../modules/notifications/firebase.service';
 import { NotificationsService } from '../modules/notifications/notifications.service';
@@ -20,11 +21,22 @@ export class WidgetRefreshJob {
     private readonly usersService: UsersService,
     private readonly balancesService: BalancesService,
     private readonly snapshotsService: SnapshotsService,
+    private readonly configService: ConfigService,
     @Optional() private readonly priceAggregator?: PriceAggregatorService,
   ) {}
 
+  private isEnabled(): boolean {
+    const globalEnabled = this.configService.get<boolean>('crons.enabled', true);
+    const jobEnabled = this.configService.get<boolean>('crons.widgetRefresh', true);
+    return globalEnabled && jobEnabled;
+  }
+
   @Cron(CronExpression.EVERY_MINUTE)
   async handleWidgetRefresh(): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Widget refresh job is disabled');
+      return;
+    }
     this.logger.log('Starting widget refresh job...');
 
     try {

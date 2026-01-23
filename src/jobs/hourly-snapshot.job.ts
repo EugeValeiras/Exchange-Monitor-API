@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { SnapshotsService } from '../modules/snapshots/snapshots.service';
 import { UsersService } from '../modules/users/users.service';
@@ -10,13 +11,24 @@ export class HourlySnapshotJob {
   constructor(
     private readonly snapshotsService: SnapshotsService,
     private readonly usersService: UsersService,
+    private readonly configService: ConfigService,
   ) {}
+
+  private isEnabled(): boolean {
+    const globalEnabled = this.configService.get<boolean>('crons.enabled', true);
+    const jobEnabled = this.configService.get<boolean>('crons.hourlySnapshot', true);
+    return globalEnabled && jobEnabled;
+  }
 
   @Cron(CronExpression.EVERY_HOUR, {
     name: 'hourly-snapshot',
     timeZone: 'UTC',
   })
   async handleHourlySnapshot(): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Hourly snapshot job is disabled');
+      return;
+    }
     this.logger.log('Starting hourly snapshot job...');
 
     try {

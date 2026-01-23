@@ -211,7 +211,7 @@ export class ImportsService {
         record['Fee Currency'] && record['Fee Currency'] !== '-'
           ? record['Fee Currency']
           : undefined,
-      timestamp: new Date(record['Date / Time (UTC)']),
+      timestamp: this.parseNexoDate(record['Date / Time (UTC)']),
       rawData: {
         ...record,
         inputCurrency: record['Input Currency'],
@@ -243,6 +243,35 @@ export class ImportsService {
     if (!value || value === '-' || value === '') return 0;
     const parsed = parseFloat(value.replace(/,/g, ''));
     return isNaN(parsed) ? 0 : parsed;
+  }
+
+  /**
+   * Parse Nexo date string as UTC
+   * Nexo format: "2024-01-15 14:30:00" (already in UTC)
+   */
+  private parseNexoDate(dateStr: string): Date {
+    if (!dateStr) return new Date();
+
+    // If the date string doesn't have timezone info, append 'Z' to treat it as UTC
+    const trimmed = dateStr.trim();
+
+    // Check if it already has timezone indicator
+    if (trimmed.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(trimmed)) {
+      return new Date(trimmed);
+    }
+
+    // Replace space with 'T' and append 'Z' for proper ISO 8601 UTC format
+    // "2024-01-15 14:30:00" -> "2024-01-15T14:30:00Z"
+    const isoString = trimmed.replace(' ', 'T') + 'Z';
+    const parsed = new Date(isoString);
+
+    // Fallback if parsing fails
+    if (isNaN(parsed.getTime())) {
+      this.logger.warn(`Failed to parse Nexo date as UTC: ${dateStr}`);
+      return new Date(dateStr);
+    }
+
+    return parsed;
   }
 
   private mapNexoType(type: string): TransactionType {
