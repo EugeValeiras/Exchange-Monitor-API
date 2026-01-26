@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, UseGuards, Res, Header } from '@nestjs/common';
+import { Response } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -92,6 +93,21 @@ export class TransactionsController {
         ? `Sincronización completa: ${synced} transacciones`
         : `Sincronizadas ${synced} transacciones`,
     };
+  }
+
+  @Get('export')
+  @ApiOperation({ summary: 'Export transactions to Excel' })
+  @ApiResponse({ status: 200, description: 'Excel file' })
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  async exportToExcel(
+    @CurrentUser('userId') userId: string,
+    @Query() filter: TransactionFilterDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    const buffer = await this.transactionsService.exportToExcel(userId, filter);
+    const filename = `transacciones_${new Date().toISOString().split('T')[0]}.xlsx`;
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buffer);
   }
 
   @Get(':id')

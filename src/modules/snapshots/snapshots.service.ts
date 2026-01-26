@@ -552,11 +552,18 @@ export class SnapshotsService {
       };
     }
 
-    // Determine date range
+    // Determine date range - max 1 year back
     const firstTxDate = new Date(transactions[0].timestamp);
-    const startDate = options?.fromDate
-      ? new Date(options.fromDate)
-      : firstTxDate;
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+    let startDate: Date;
+    if (options?.fromDate) {
+      startDate = new Date(options.fromDate);
+    } else {
+      // Use the later of: first transaction date or 1 year ago
+      startDate = firstTxDate > oneYearAgo ? firstTxDate : oneYearAgo;
+    }
     const endDate = new Date();
 
     // Set to start of day
@@ -597,6 +604,19 @@ export class SnapshotsService {
       allAssets.add(tx.asset);
       if (tx.feeAsset) allAssets.add(tx.feeAsset);
     }
+
+    // First, apply all transactions before the start date to get initial balance
+    while (
+      txIndex < transactions.length &&
+      new Date(transactions[txIndex].timestamp) < startDate
+    ) {
+      this.applyTransaction(balanceState, transactions[txIndex]);
+      txIndex++;
+    }
+
+    this.logger.log(
+      `[RebuildHistory] Applied ${txIndex} transactions before start date to build initial balance`,
+    );
 
     // Process day by day
     const currentDate = new Date(startDate);

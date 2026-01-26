@@ -160,7 +160,7 @@ export class PricesService {
       }
 
       // Try to get from WebSocket cache first (instant!)
-      // Try USDT first, then USD (treated as equivalent)
+      // Try USDT first, then USD, then futures (USDT:USDT)
       if (this.priceAggregator) {
         let wsPrice = this.priceAggregator.getLatestPrice(`${normalized}/USDT`);
         if (wsPrice && wsPrice.price > 0) {
@@ -174,16 +174,28 @@ export class PricesService {
           this.logger.debug(`[WS Cache HIT] ${asset} (${normalized}/USD) = ${wsPrice.price}`);
           continue;
         }
+        // Try futures symbol (e.g., MON/USDT:USDT)
+        wsPrice = this.priceAggregator.getLatestPrice(`${normalized}/USDT:USDT`);
+        if (wsPrice && wsPrice.price > 0) {
+          pricesMap[asset] = wsPrice.price;
+          this.logger.debug(`[WS Cache HIT] ${asset} (${normalized}/USDT:USDT futures) = ${wsPrice.price}`);
+          continue;
+        }
         this.logger.debug(`[WS Cache MISS] ${asset}`);
       }
 
-      // Also check local cache (USDT first, then USD)
+      // Also check local cache (USDT first, then USD, then futures)
       let cached = this.priceCache.get(`${normalized}/USDT`);
       if (cached && Date.now() - cached.timestamp.getTime() < this.cacheTtlMs) {
         pricesMap[asset] = cached.price;
         continue;
       }
       cached = this.priceCache.get(`${normalized}/USD`);
+      if (cached && Date.now() - cached.timestamp.getTime() < this.cacheTtlMs) {
+        pricesMap[asset] = cached.price;
+        continue;
+      }
+      cached = this.priceCache.get(`${normalized}/USDT:USDT`);
       if (cached && Date.now() - cached.timestamp.getTime() < this.cacheTtlMs) {
         pricesMap[asset] = cached.price;
         continue;
@@ -251,7 +263,13 @@ export class PricesService {
           try {
             price = await this.getPrice(`${normalized}/USD`);
           } catch {
-            // Both failed
+            // Try futures symbol as last resort
+            try {
+              price = await this.getPrice(`${normalized}/USDT:USDT`);
+              this.logger.debug(`[REST] Got futures price for ${normalized}/USDT:USDT`);
+            } catch {
+              // All failed
+            }
           }
         }
 

@@ -1,6 +1,7 @@
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, FilterQuery } from 'mongoose';
+import * as ExcelJS from 'exceljs';
 import { Transaction, TransactionDocument } from './schemas/transaction.schema';
 import { ExchangeCredentialsService } from '../exchange-credentials/exchange-credentials.service';
 import { ExchangeFactoryService } from '../../integrations/exchanges/exchange-factory.service';
@@ -53,10 +54,18 @@ export class TransactionsService {
     if (filter.assets) {
       const assetsArray = filter.assets.split(',').filter(a => a.trim());
       if (assetsArray.length > 0) {
-        query.asset = { $in: assetsArray };
+        // Match either the primary asset OR the price asset (for trades)
+        query.$or = [
+          { asset: { $in: assetsArray } },
+          { priceAsset: { $in: assetsArray } },
+        ];
       }
     } else if (filter.asset) {
-      query.asset = filter.asset;
+      // Match either the primary asset OR the price asset (for trades)
+      query.$or = [
+        { asset: filter.asset },
+        { priceAsset: filter.asset },
+      ];
     }
     if (filter.startDate || filter.endDate) {
       query.timestamp = {};
@@ -149,7 +158,11 @@ export class TransactionsService {
     if (filter?.assets) {
       const assetsArray = filter.assets.split(',').filter((a) => a.trim());
       if (assetsArray.length > 0) {
-        query.asset = { $in: assetsArray };
+        // Match either the primary asset OR the price asset (for trades)
+        query.$or = [
+          { asset: { $in: assetsArray } },
+          { priceAsset: { $in: assetsArray } },
+        ];
       }
     }
     if (filter?.startDate || filter?.endDate) {
@@ -173,6 +186,10 @@ export class TransactionsService {
       byType[tx.type] = (byType[tx.type] || 0) + 1;
       byExchange[tx.exchange] = (byExchange[tx.exchange] || 0) + 1;
       byAsset[tx.asset] = (byAsset[tx.asset] || 0) + 1;
+      // Also count priceAsset for trades (the received/paid asset)
+      if (tx.priceAsset && tx.type === TransactionType.TRADE) {
+        byAsset[tx.priceAsset] = (byAsset[tx.priceAsset] || 0) + 1;
+      }
     }
 
     // Calculate interest in USD from filtered transactions
@@ -429,5 +446,152 @@ export class TransactionsService {
       .find({ userId: new Types.ObjectId(userId) })
       .sort({ timestamp: 1 })
       .exec();
+  }
+
+  /**
+   * Export transactions to Excel with filters
+   */
+  async exportToExcel(
+    userId: string,
+    filter: TransactionFilterDto,
+  ): Promise<Buffer> {
+    // Build query (same as findAll but without pagination)
+    const query: FilterQuery<Transaction> = {
+      userId: new Types.ObjectId(userId),
+    };
+
+    if (filter.exchange) {
+      query.exchange = filter.exchange;
+    }
+    if (filter.types) {
+      const typesArray = filter.types.split(',').filter((t) => t.trim());
+      if (typesArray.length > 0) {
+        query.type = { $in: typesArray };
+      }
+    } else if (filter.type) {
+      query.type = filter.type;
+    }
+    if (filter.assets) {
+      const assetsArray = filter.assets.split(',').filter((a) => a.trim());
+      if (assetsArray.length > 0) {
+        query.$or = [
+          { asset: { $in: assetsArray } },
+          { priceAsset: { $in: assetsArray } },
+        ];
+      }
+    } else if (filter.asset) {
+      query.$or = [{ asset: filter.asset }, { priceAsset: filter.asset }];
+    }
+    if (filter.startDate || filter.endDate) {
+      query.timestamp = {};
+      if (filter.startDate) {
+        query.timestamp.$gte = new Date(filter.startDate);
+      }
+      if (filter.endDate) {
+        query.timestamp.$lte = new Date(filter.endDate);
+      }
+    }
+
+    const transactions = await this.transactionModel
+      .find(query)
+      .sort({ timestamp: -1 })
+      .exec();
+
+    // Create workbook
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Exchange Monitor';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Transacciones');
+
+    // Define columns
+    sheet.columns = [
+      { header: 'Fecha', key: 'timestamp', width: 20 },
+      { header: 'Exchange', key: 'exchange', width: 15 },
+      { header: 'Tipo', key: 'type', width: 12 },
+      { header: 'Asset', key: 'asset', width: 10 },
+      { header: 'Cantidad', key: 'amount', width: 18 },
+      { header: 'Asset Recibido', key: 'priceAsset', width: 14 },
+      { header: 'Cantidad Recibida', key: 'receivedAmount', width: 18 },
+      { header: 'Precio', key: 'price', width: 15 },
+      { header: 'Par', key: 'pair', width: 15 },
+      { header: 'Lado', key: 'side', width: 10 },
+      { header: 'Fee', key: 'fee', width: 15 },
+      { header: 'Fee Asset', key: 'feeAsset', width: 10 },
+    ];
+
+    // Style header row
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF4472C4' },
+    };
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+    // Add data
+    for (const tx of transactions) {
+      const receivedAmount =
+        tx.type === TransactionType.TRADE && tx.price
+          ? tx.amount * tx.price
+          : null;
+
+      const row = sheet.addRow({
+        timestamp: tx.timestamp.toISOString().replace('T', ' ').substring(0, 19),
+        exchange: this.getExchangeLabel(tx.exchange),
+        type: this.getTypeLabel(tx.type),
+        asset: tx.asset,
+        amount: tx.amount,
+        priceAsset: tx.priceAsset || '-',
+        receivedAmount: receivedAmount ?? '-',
+        price: tx.price || '-',
+        pair: tx.pair || '-',
+        side: tx.side ? (tx.side === 'buy' ? 'Compra' : 'Venta') : '-',
+        fee: tx.fee || '-',
+        feeAsset: tx.feeAsset || '-',
+      });
+
+      // Color amount based on type
+      const amountCell = row.getCell('amount');
+      if (
+        tx.type === TransactionType.DEPOSIT ||
+        tx.type === TransactionType.INTEREST ||
+        tx.side === 'buy'
+      ) {
+        amountCell.font = { color: { argb: 'FF0ECB81' } };
+      } else if (
+        tx.type === TransactionType.WITHDRAWAL ||
+        tx.type === TransactionType.FEE ||
+        tx.side === 'sell'
+      ) {
+        amountCell.font = { color: { argb: 'FFF6465D' } };
+      }
+    }
+
+    // Generate buffer
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  private getExchangeLabel(exchange: string): string {
+    const labels: Record<string, string> = {
+      binance: 'Binance',
+      'binance-futures': 'Binance Futures',
+      kraken: 'Kraken',
+      'nexo-pro': 'Nexo Pro',
+      'nexo-manual': 'Nexo',
+    };
+    return labels[exchange] || exchange;
+  }
+
+  private getTypeLabel(type: string): string {
+    const labels: Record<string, string> = {
+      deposit: 'Depósito',
+      withdrawal: 'Retiro',
+      trade: 'Trade',
+      interest: 'Interés',
+      fee: 'Comisión',
+    };
+    return labels[type] || type;
   }
 }
