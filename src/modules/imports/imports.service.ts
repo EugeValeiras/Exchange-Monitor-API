@@ -94,6 +94,12 @@ export class ImportsService {
 
     for (const record of records) {
       try {
+        // Skip internal transfers and rejected transactions
+        if (this.shouldSkipNexoTransaction(record)) {
+          skipped++;
+          continue;
+        }
+
         const transaction = this.mapNexoCsvToTransaction(
           record,
           credentialId,
@@ -272,6 +278,20 @@ export class ImportsService {
     }
 
     return parsed;
+  }
+
+  private shouldSkipNexoTransaction(record: NexoCsvRow): boolean {
+    const type = record.Type.toLowerCase().trim();
+    // Skip internal wallet transfers (e.g. Savings → Credit Line)
+    if (type === 'transfer in' || type === 'transfer out') {
+      return true;
+    }
+    // Skip rejected/cancelled transactions
+    const details = (record.Details || '').toLowerCase().trim();
+    if (details.startsWith('rejected')) {
+      return true;
+    }
+    return false;
   }
 
   private mapNexoType(type: string): TransactionType {
