@@ -815,10 +815,7 @@ export class PnlService {
   }
 
   private isDisposal(tx: TransactionDocument): boolean {
-    return (
-      tx.type === TransactionType.WITHDRAWAL ||
-      (tx.type === TransactionType.TRADE && tx.side === 'sell')
-    );
+    return tx.type === TransactionType.TRADE && tx.side === 'sell';
   }
 
   private async addLot(
