@@ -808,7 +808,6 @@ export class PnlService {
 
   private isAcquisition(tx: TransactionDocument): boolean {
     return (
-      tx.type === TransactionType.DEPOSIT ||
       tx.type === TransactionType.INTEREST ||
       (tx.type === TransactionType.TRADE && tx.side === 'buy')
     );
