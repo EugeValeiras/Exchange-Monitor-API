@@ -6,6 +6,10 @@ import { ExchangeFactoryService } from '../../integrations/exchanges/exchange-fa
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { IPrice } from '../../common/interfaces/exchange-adapter.interface';
 import { PriceResponseDto, ConvertResponseDto } from './dto/price-response.dto';
+import {
+  SwapPreviewResponseDto,
+  SwapExchangeResultDto,
+} from './dto/swap-preview.dto';
 import { PriceAggregatorService } from './websocket/price-aggregator.service';
 
 @Injectable()
@@ -14,6 +18,11 @@ export class PricesService {
   private priceCache = new Map<string, { price: number; timestamp: Date }>();
   private readonly cacheTtlMs = 60000; // 1 minute cache
   private readonly binanceHostname?: string;
+  private marketsCache = new Map<
+    string,
+    { markets: Record<string, any>; timestamp: number }
+  >();
+  private readonly marketsCacheTtlMs = 10 * 60 * 1000; // 10 min
 
   // USDT is the base currency, always valued at 1
   private readonly stablecoins = new Set(['USDT']);
@@ -447,5 +456,270 @@ export class PricesService {
     } catch {
       return null;
     }
+  }
+
+  // ── Swap Preview ───────────────────────────────────────────────
+
+  async getSwapPreview(
+    from: string,
+    to: string,
+    amount: number,
+  ): Promise<SwapPreviewResponseDto> {
+    const exchangeConfigs: { type: ExchangeType; label: string }[] = [
+      { type: ExchangeType.BINANCE, label: 'Binance' },
+      { type: ExchangeType.KRAKEN, label: 'Kraken' },
+    ];
+
+    const results: SwapExchangeResultDto[] = [];
+
+    await Promise.all(
+      exchangeConfigs.map(async (config) => {
+        try {
+          const result = await this.calculateSwapForExchange(
+            config.type,
+            config.label,
+            from,
+            to,
+            amount,
+          );
+          if (result) results.push(result);
+        } catch (error) {
+          this.logger.debug(
+            `Swap preview failed for ${config.label}: ${error.message}`,
+          );
+        }
+      }),
+    );
+
+    results.sort((a, b) => b.netAmount - a.netAmount);
+    if (results.length > 0) {
+      results[0].isBest = true;
+    }
+
+    return { from, to, amount, results };
+  }
+
+  private async calculateSwapForExchange(
+    exchangeType: ExchangeType,
+    label: string,
+    from: string,
+    to: string,
+    amount: number,
+  ): Promise<SwapExchangeResultDto | null> {
+    const client = this.createPublicCcxtClient(exchangeType);
+    if (!client) return null;
+
+    const markets = await this.loadMarketsWithCache(client, exchangeType);
+
+    // Try direct pair FROM/TO (and USD/USDT variants)
+    const directPairs = this.getPairVariants(from, to, markets);
+    for (const pair of directPairs) {
+      const market = markets[pair];
+      if (!market?.active) continue;
+
+      try {
+        const ticker = await client.fetchTicker(pair);
+        const bid = ticker.bid || ticker.last || 0;
+        if (bid <= 0) continue;
+
+        const takerFee = market.taker || 0;
+        const grossAmount = amount * bid;
+        const feeAmount = grossAmount * takerFee;
+
+        return {
+          exchange: exchangeType,
+          exchangeLabel: label,
+          rate: bid,
+          takerFeeRate: takerFee,
+          makerFeeRate: market.maker || 0,
+          feeAmount,
+          grossAmount,
+          netAmount: grossAmount - feeAmount,
+          pair,
+          route: null,
+          isBest: false,
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    // Try reverse pair TO/FROM (buy TO with FROM)
+    const reversePairs = this.getPairVariants(to, from, markets);
+    for (const pair of reversePairs) {
+      const market = markets[pair];
+      if (!market?.active) continue;
+
+      try {
+        const ticker = await client.fetchTicker(pair);
+        const ask = ticker.ask || ticker.last || 0;
+        if (ask <= 0) continue;
+
+        const takerFee = market.taker || 0;
+        const grossAmount = amount / ask;
+        const feeAmount = grossAmount * takerFee;
+
+        return {
+          exchange: exchangeType,
+          exchangeLabel: label,
+          rate: 1 / ask,
+          takerFeeRate: takerFee,
+          makerFeeRate: market.maker || 0,
+          feeAmount,
+          grossAmount,
+          netAmount: grossAmount - feeAmount,
+          pair,
+          route: null,
+          isBest: false,
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    // Route through stablecoin (USDT or USD)
+    return this.calculateSwapViaStablecoin(
+      client,
+      exchangeType,
+      label,
+      from,
+      to,
+      amount,
+      markets,
+    );
+  }
+
+  private async calculateSwapViaStablecoin(
+    client: any,
+    exchangeType: ExchangeType,
+    label: string,
+    from: string,
+    to: string,
+    amount: number,
+    markets: Record<string, any>,
+  ): Promise<SwapExchangeResultDto | null> {
+    const stablecoins = ['USDT', 'USD'];
+
+    for (const stable of stablecoins) {
+      if (from === stable || to === stable) continue;
+
+      // FROM/stable pair
+      const fromPairs = this.getPairVariants(from, stable, markets);
+      const fromPair = fromPairs.find((p) => markets[p]?.active);
+      if (!fromPair) continue;
+
+      // TO/stable pair
+      const toPairs = this.getPairVariants(to, stable, markets);
+      const toPair = toPairs.find((p) => markets[p]?.active);
+      if (!toPair) continue;
+
+      try {
+        const [fromTicker, toTicker] = await Promise.all([
+          client.fetchTicker(fromPair),
+          client.fetchTicker(toPair),
+        ]);
+
+        const fromBid = fromTicker.bid || fromTicker.last || 0;
+        const toAsk = toTicker.ask || toTicker.last || 0;
+        if (fromBid <= 0 || toAsk <= 0) continue;
+
+        const fromFee = markets[fromPair].taker || 0;
+        const toFee = markets[toPair].taker || 0;
+
+        // Step 1: sell FROM at bid, deduct fee
+        const stableAmount = amount * fromBid * (1 - fromFee);
+        // Step 2: buy TO at ask, deduct fee
+        const grossTo = stableAmount / toAsk;
+        const toFeeAmount = grossTo * toFee;
+        const netAmount = grossTo - toFeeAmount;
+
+        const totalFeeAmount =
+          amount * fromBid * fromFee + toFeeAmount;
+        const combinedFeeRate = 1 - (1 - fromFee) * (1 - toFee);
+
+        return {
+          exchange: exchangeType,
+          exchangeLabel: label,
+          rate: fromBid / toAsk,
+          takerFeeRate: combinedFeeRate,
+          makerFeeRate:
+            (markets[fromPair].maker || 0) +
+            (markets[toPair].maker || 0),
+          feeAmount: totalFeeAmount,
+          grossAmount: (amount * fromBid) / toAsk,
+          netAmount,
+          pair: `${fromPair} → ${toPair}`,
+          route: [fromPair, toPair],
+          isBest: false,
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Get possible pair symbols trying both USD and USDT variants
+   */
+  private getPairVariants(
+    base: string,
+    quote: string,
+    markets: Record<string, any>,
+  ): string[] {
+    const pairs: string[] = [];
+    const exact = `${base}/${quote}`;
+    if (markets[exact]) pairs.push(exact);
+
+    // Try USD/USDT alternatives
+    const alts: Record<string, string> = { USDT: 'USD', USD: 'USDT' };
+    if (alts[quote]) {
+      const alt = `${base}/${alts[quote]}`;
+      if (markets[alt]) pairs.push(alt);
+    }
+    if (alts[base]) {
+      const alt = `${alts[base]}/${quote}`;
+      if (markets[alt]) pairs.push(alt);
+    }
+
+    return pairs;
+  }
+
+  private createPublicCcxtClient(exchange: ExchangeType): any | null {
+    const ccxtLib = require('ccxt');
+    switch (exchange) {
+      case ExchangeType.BINANCE: {
+        const config: any = { enableRateLimit: true };
+        if (this.binanceHostname === 'binance.us') {
+          return new ccxtLib.binanceus(config);
+        }
+        if (this.binanceHostname) {
+          config.hostname = this.binanceHostname;
+        }
+        return new ccxtLib.binance(config);
+      }
+      case ExchangeType.KRAKEN:
+        return new ccxtLib.kraken({ enableRateLimit: true });
+      default:
+        return null;
+    }
+  }
+
+  private async loadMarketsWithCache(
+    client: any,
+    exchange: ExchangeType,
+  ): Promise<Record<string, any>> {
+    const cached = this.marketsCache.get(exchange);
+    if (cached && Date.now() - cached.timestamp < this.marketsCacheTtlMs) {
+      return cached.markets;
+    }
+
+    await client.loadMarkets();
+    this.marketsCache.set(exchange, {
+      markets: client.markets,
+      timestamp: Date.now(),
+    });
+    return client.markets;
   }
 }

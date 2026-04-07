@@ -8,6 +8,7 @@ import {
 } from '@nestjs/swagger';
 import { PricesService } from './prices.service';
 import { PriceResponseDto, ConvertResponseDto } from './dto/price-response.dto';
+import { SwapPreviewResponseDto } from './dto/swap-preview.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -25,6 +26,24 @@ export class PricesController {
     @CurrentUser('userId') userId: string,
   ): Promise<PriceResponseDto[]> {
     return this.pricesService.getPricesForUserAssets(userId);
+  }
+
+  @Get('swap-preview')
+  @ApiOperation({ summary: 'Preview swap across exchanges with fees' })
+  @ApiQuery({ name: 'from', example: 'BTC' })
+  @ApiQuery({ name: 'to', example: 'USDT' })
+  @ApiQuery({ name: 'amount', example: 1 })
+  @ApiResponse({ status: 200, type: SwapPreviewResponseDto })
+  async getSwapPreview(
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('amount') amount: number,
+  ): Promise<SwapPreviewResponseDto> {
+    return this.pricesService.getSwapPreview(
+      from.toUpperCase(),
+      to.toUpperCase(),
+      Number(amount),
+    );
   }
 
   @Get('convert')
