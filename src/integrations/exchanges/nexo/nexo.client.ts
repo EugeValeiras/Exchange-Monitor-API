@@ -137,4 +137,19 @@ export class NexoClient {
     });
     return response.data;
   }
+
+  async getQuote(params: {
+    pair: string;
+    amount: string;
+    side: 'buy' | 'sell';
+  }): Promise<{ price: string; pair: string }> {
+    const response = await this.client.get<{ price: string; pair: string }>(
+      '/api/v1/quote',
+      {
+        headers: this.getAuthHeaders(),
+        params,
+      },
+    );
+    return response.data;
+  }
 }

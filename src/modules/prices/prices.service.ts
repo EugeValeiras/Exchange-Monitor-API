@@ -5,6 +5,7 @@ import { SettingsService } from '../settings/settings.service';
 import { ExchangeFactoryService } from '../../integrations/exchanges/exchange-factory.service';
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { IPrice } from '../../common/interfaces/exchange-adapter.interface';
+import { NexoClient } from '../../integrations/exchanges/nexo/nexo.client';
 import { PriceResponseDto, ConvertResponseDto } from './dto/price-response.dto';
 import {
   SwapPreviewResponseDto,
@@ -464,6 +465,7 @@ export class PricesService {
     from: string,
     to: string,
     amount: number,
+    userId?: string,
   ): Promise<SwapPreviewResponseDto> {
     const exchangeConfigs: { type: ExchangeType; label: string }[] = [
       { type: ExchangeType.BINANCE, label: 'Binance' },
@@ -472,24 +474,35 @@ export class PricesService {
 
     const results: SwapExchangeResultDto[] = [];
 
-    await Promise.all(
-      exchangeConfigs.map(async (config) => {
-        try {
-          const result = await this.calculateSwapForExchange(
-            config.type,
-            config.label,
-            from,
-            to,
-            amount,
-          );
+    const promises: Promise<void>[] = exchangeConfigs.map(async (config) => {
+      try {
+        const result = await this.calculateSwapForExchange(
+          config.type,
+          config.label,
+          from,
+          to,
+          amount,
+        );
+        if (result) results.push(result);
+      } catch (error) {
+        this.logger.debug(
+          `Swap preview failed for ${config.label}: ${error.message}`,
+        );
+      }
+    });
+
+    // Add Nexo if user has credentials
+    if (userId) {
+      promises.push(
+        this.calculateSwapForNexo(from, to, amount, userId).then((result) => {
           if (result) results.push(result);
-        } catch (error) {
-          this.logger.debug(
-            `Swap preview failed for ${config.label}: ${error.message}`,
-          );
-        }
-      }),
-    );
+        }).catch((error) => {
+          this.logger.debug(`Swap preview failed for Nexo: ${error.message}`);
+        }),
+      );
+    }
+
+    await Promise.all(promises);
 
     results.sort((a, b) => b.netAmount - a.netAmount);
     if (results.length > 0) {
@@ -655,6 +668,88 @@ export class PricesService {
       } catch {
         continue;
       }
+    }
+
+    return null;
+  }
+
+  private async calculateSwapForNexo(
+    from: string,
+    to: string,
+    amount: number,
+    userId: string,
+  ): Promise<SwapExchangeResultDto | null> {
+    const credentials = await this.credentialsService.findActiveByUser(userId);
+    const nexoCred = credentials.find(
+      (c) => c.exchange === ExchangeType.NEXO_PRO,
+    );
+    if (!nexoCred) return null;
+
+    const decrypted =
+      this.credentialsService.getDecryptedCredentials(nexoCred);
+    const client = new NexoClient({
+      apiKey: decrypted.apiKey,
+      apiSecret: decrypted.apiSecret,
+    });
+
+    // Try direct pair (sell FROM for TO)
+    const directPair = `${from}/${to}`;
+    try {
+      const quote = await client.getQuote({
+        pair: directPair,
+        amount: amount.toString(),
+        side: 'sell',
+      });
+
+      const price = parseFloat(quote.price);
+      if (price > 0) {
+        const grossAmount = amount * price;
+        return {
+          exchange: ExchangeType.NEXO_PRO,
+          exchangeLabel: 'Nexo Pro',
+          rate: price,
+          takerFeeRate: 0,
+          makerFeeRate: 0,
+          feeAmount: 0,
+          grossAmount,
+          netAmount: grossAmount,
+          pair: directPair,
+          route: null,
+          isBest: false,
+        };
+      }
+    } catch {
+      // Direct pair not available, try reverse
+    }
+
+    // Try reverse pair (buy TO with FROM)
+    const reversePair = `${to}/${from}`;
+    try {
+      const quote = await client.getQuote({
+        pair: reversePair,
+        amount: amount.toString(),
+        side: 'buy',
+      });
+
+      const price = parseFloat(quote.price);
+      if (price > 0) {
+        const grossAmount = amount / price;
+        return {
+          exchange: ExchangeType.NEXO_PRO,
+          exchangeLabel: 'Nexo Pro',
+          rate: 1 / price,
+          takerFeeRate: 0,
+          makerFeeRate: 0,
+          feeAmount: 0,
+          grossAmount,
+          netAmount: grossAmount,
+          pair: reversePair,
+          route: null,
+          isBest: false,
+        };
+      }
+    } catch {
+      // Reverse pair not available either
     }
 
     return null;

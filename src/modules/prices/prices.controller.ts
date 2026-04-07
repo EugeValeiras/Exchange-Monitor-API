@@ -38,11 +38,13 @@ export class PricesController {
     @Query('from') from: string,
     @Query('to') to: string,
     @Query('amount') amount: number,
+    @CurrentUser('userId') userId: string,
   ): Promise<SwapPreviewResponseDto> {
     return this.pricesService.getSwapPreview(
       from.toUpperCase(),
       to.toUpperCase(),
       Number(amount),
+      userId,
     );
   }
 
