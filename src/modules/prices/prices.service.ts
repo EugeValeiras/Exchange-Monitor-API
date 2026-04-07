@@ -482,6 +482,7 @@ export class PricesService {
           from,
           to,
           amount,
+          userId,
         );
         if (result) results.push(result);
       } catch (error) {
@@ -518,11 +519,17 @@ export class PricesService {
     from: string,
     to: string,
     amount: number,
+    userId?: string,
   ): Promise<SwapExchangeResultDto | null> {
     const client = this.createPublicCcxtClient(exchangeType);
     if (!client) return null;
 
     const markets = await this.loadMarketsWithCache(client, exchangeType);
+
+    // Try to get real user fees via authenticated client
+    const userFees = userId
+      ? await this.getUserFees(exchangeType, userId)
+      : null;
 
     // Try direct pair FROM/TO (and USD/USDT variants)
     const directPairs = this.getPairVariants(from, to, markets);
@@ -535,7 +542,8 @@ export class PricesService {
         const bid = ticker.bid || ticker.last || 0;
         if (bid <= 0) continue;
 
-        const takerFee = market.taker || 0;
+        const takerFee = userFees?.taker ?? market.taker ?? 0;
+        const makerFee = userFees?.maker ?? market.maker ?? 0;
         const grossAmount = amount * bid;
         const feeAmount = grossAmount * takerFee;
 
@@ -544,7 +552,7 @@ export class PricesService {
           exchangeLabel: label,
           rate: bid,
           takerFeeRate: takerFee,
-          makerFeeRate: market.maker || 0,
+          makerFeeRate: makerFee,
           feeAmount,
           grossAmount,
           netAmount: grossAmount - feeAmount,
@@ -568,7 +576,8 @@ export class PricesService {
         const ask = ticker.ask || ticker.last || 0;
         if (ask <= 0) continue;
 
-        const takerFee = market.taker || 0;
+        const takerFee = userFees?.taker ?? market.taker ?? 0;
+        const makerFee = userFees?.maker ?? market.maker ?? 0;
         const grossAmount = amount / ask;
         const feeAmount = grossAmount * takerFee;
 
@@ -577,7 +586,7 @@ export class PricesService {
           exchangeLabel: label,
           rate: 1 / ask,
           takerFeeRate: takerFee,
-          makerFeeRate: market.maker || 0,
+          makerFeeRate: makerFee,
           feeAmount,
           grossAmount,
           netAmount: grossAmount - feeAmount,
@@ -599,6 +608,7 @@ export class PricesService {
       to,
       amount,
       markets,
+      userFees,
     );
   }
 
@@ -610,6 +620,7 @@ export class PricesService {
     to: string,
     amount: number,
     markets: Record<string, any>,
+    userFees?: { taker: number; maker: number } | null,
   ): Promise<SwapExchangeResultDto | null> {
     const stablecoins = ['USDT', 'USD'];
 
@@ -636,8 +647,10 @@ export class PricesService {
         const toAsk = toTicker.ask || toTicker.last || 0;
         if (fromBid <= 0 || toAsk <= 0) continue;
 
-        const fromFee = markets[fromPair].taker || 0;
-        const toFee = markets[toPair].taker || 0;
+        const fromFee = userFees?.taker ?? markets[fromPair].taker ?? 0;
+        const toFee = userFees?.taker ?? markets[toPair].taker ?? 0;
+        const fromMaker = userFees?.maker ?? markets[fromPair].maker ?? 0;
+        const toMaker = userFees?.maker ?? markets[toPair].maker ?? 0;
 
         // Step 1: sell FROM at bid, deduct fee
         const stableAmount = amount * fromBid * (1 - fromFee);
@@ -655,9 +668,7 @@ export class PricesService {
           exchangeLabel: label,
           rate: fromBid / toAsk,
           takerFeeRate: combinedFeeRate,
-          makerFeeRate:
-            (markets[fromPair].maker || 0) +
-            (markets[toPair].maker || 0),
+          makerFeeRate: fromMaker + toMaker,
           feeAmount: totalFeeAmount,
           grossAmount: (amount * fromBid) / toAsk,
           netAmount,
@@ -753,6 +764,84 @@ export class PricesService {
     }
 
     return null;
+  }
+
+  /**
+   * Get real user fee rates from an authenticated CCXT client.
+   * Falls back to null if credentials are not available.
+   */
+  private userFeesCache = new Map<
+    string,
+    { fees: { taker: number; maker: number }; timestamp: number }
+  >();
+  private readonly userFeesCacheTtlMs = 30 * 60 * 1000; // 30 min
+
+  private async getUserFees(
+    exchangeType: ExchangeType,
+    userId: string,
+  ): Promise<{ taker: number; maker: number } | null> {
+    const cacheKey = `${userId}:${exchangeType}`;
+    const cached = this.userFeesCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < this.userFeesCacheTtlMs) {
+      return cached.fees;
+    }
+
+    try {
+      const credentials =
+        await this.credentialsService.findActiveByUser(userId);
+      const cred = credentials.find((c) => c.exchange === exchangeType);
+      if (!cred) return null;
+
+      const decrypted =
+        this.credentialsService.getDecryptedCredentials(cred);
+      const ccxtLib = require('ccxt');
+
+      let client: any;
+      switch (exchangeType) {
+        case ExchangeType.BINANCE: {
+          const config: any = {
+            apiKey: decrypted.apiKey,
+            secret: decrypted.apiSecret,
+            enableRateLimit: true,
+          };
+          if (this.binanceHostname === 'binance.us') {
+            client = new ccxtLib.binanceus(config);
+          } else {
+            if (this.binanceHostname) config.hostname = this.binanceHostname;
+            client = new ccxtLib.binance(config);
+          }
+          break;
+        }
+        case ExchangeType.KRAKEN:
+          client = new ccxtLib.kraken({
+            apiKey: decrypted.apiKey,
+            secret: decrypted.apiSecret,
+            enableRateLimit: true,
+          });
+          break;
+        default:
+          return null;
+      }
+
+      // fetchTradingFee returns the user's actual fee tier
+      const feeInfo = await client.fetchTradingFee('BTC/USDT');
+      const fees = {
+        taker: feeInfo.taker ?? 0,
+        maker: feeInfo.maker ?? 0,
+      };
+
+      this.logger.log(
+        `User fees for ${exchangeType}: taker=${fees.taker}, maker=${fees.maker}`,
+      );
+
+      this.userFeesCache.set(cacheKey, { fees, timestamp: Date.now() });
+      return fees;
+    } catch (error) {
+      this.logger.debug(
+        `Could not fetch user fees for ${exchangeType}: ${error.message}`,
+      );
+      return null;
+    }
   }
 
   /**
