@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -9,6 +9,7 @@ import {
 import { PricesService } from './prices.service';
 import { PriceResponseDto, ConvertResponseDto } from './dto/price-response.dto';
 import { SwapPreviewResponseDto } from './dto/swap-preview.dto';
+import { ExecuteSwapDto, SwapExecutionResultDto } from './dto/swap-execute.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -44,6 +45,22 @@ export class PricesController {
       from.toUpperCase(),
       to.toUpperCase(),
       Number(amount),
+      userId,
+    );
+  }
+
+  @Post('swap-execute')
+  @ApiOperation({ summary: 'Execute a swap on a specific exchange' })
+  @ApiResponse({ status: 201, type: SwapExecutionResultDto })
+  async executeSwap(
+    @Body() dto: ExecuteSwapDto,
+    @CurrentUser('userId') userId: string,
+  ): Promise<SwapExecutionResultDto> {
+    return this.pricesService.executeSwap(
+      dto.from.toUpperCase(),
+      dto.to.toUpperCase(),
+      dto.amount,
+      dto.exchange,
       userId,
     );
   }

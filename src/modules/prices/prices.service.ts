@@ -11,6 +11,7 @@ import {
   SwapPreviewResponseDto,
   SwapExchangeResultDto,
 } from './dto/swap-preview.dto';
+import { SwapExecutionResultDto } from './dto/swap-execute.dto';
 import { PriceAggregatorService } from './websocket/price-aggregator.service';
 
 @Injectable()
@@ -868,6 +869,187 @@ export class PricesService {
     }
 
     return pairs;
+  }
+
+  // ── Swap Execution ──────────────────────────────────────────────
+
+  async executeSwap(
+    from: string,
+    to: string,
+    amount: number,
+    exchange: string,
+    userId: string,
+  ): Promise<SwapExecutionResultDto> {
+    if (exchange === ExchangeType.NEXO_PRO) {
+      return this.executeNexoSwap(from, to, amount, userId);
+    }
+    return this.executeCcxtSwap(from, to, amount, exchange as ExchangeType, userId);
+  }
+
+  private async executeCcxtSwap(
+    from: string,
+    to: string,
+    amount: number,
+    exchangeType: ExchangeType,
+    userId: string,
+  ): Promise<SwapExecutionResultDto> {
+    const credentials = await this.credentialsService.findActiveByUser(userId);
+    const cred = credentials.find((c) => c.exchange === exchangeType);
+    if (!cred) {
+      throw new Error(`No credentials found for ${exchangeType}`);
+    }
+
+    const decrypted = this.credentialsService.getDecryptedCredentials(cred);
+    const ccxtLib = require('ccxt');
+
+    let client: any;
+    switch (exchangeType) {
+      case ExchangeType.BINANCE: {
+        const config: any = {
+          apiKey: decrypted.apiKey,
+          secret: decrypted.apiSecret,
+          enableRateLimit: true,
+        };
+        if (this.binanceHostname === 'binance.us') {
+          client = new ccxtLib.binanceus(config);
+        } else {
+          if (this.binanceHostname) config.hostname = this.binanceHostname;
+          client = new ccxtLib.binance(config);
+        }
+        break;
+      }
+      case ExchangeType.KRAKEN:
+        client = new ccxtLib.kraken({
+          apiKey: decrypted.apiKey,
+          secret: decrypted.apiSecret,
+          enableRateLimit: true,
+        });
+        break;
+      default:
+        throw new Error(`Exchange ${exchangeType} not supported for swap execution`);
+    }
+
+    await client.loadMarkets();
+
+    // Try direct pair: FROM/TO → sell FROM
+    const directPairs = this.getPairVariants(from, to, client.markets);
+    for (const pair of directPairs) {
+      if (!client.markets[pair]?.active) continue;
+      try {
+        const order = await client.createMarketOrder(pair, 'sell', amount);
+        return this.mapCcxtOrder(order, exchangeType);
+      } catch (error) {
+        this.logger.debug(`Direct sell failed on ${pair}: ${error.message}`);
+      }
+    }
+
+    // Try reverse pair: TO/FROM → buy TO with FROM
+    const reversePairs = this.getPairVariants(to, from, client.markets);
+    for (const pair of reversePairs) {
+      if (!client.markets[pair]?.active) continue;
+      try {
+        // Use createMarketBuyOrderWithCost to spend exact amount of FROM (quote currency)
+        let order: any;
+        if (client.has['createMarketBuyOrderWithCost']) {
+          order = await client.createMarketBuyOrderWithCost(pair, amount);
+        } else {
+          // Fallback: estimate base amount from ticker
+          const ticker = await client.fetchTicker(pair);
+          const ask = ticker.ask || ticker.last;
+          const baseAmount = amount / ask;
+          order = await client.createMarketOrder(pair, 'buy', baseAmount);
+        }
+        return this.mapCcxtOrder(order, exchangeType);
+      } catch (error) {
+        this.logger.debug(`Reverse buy failed on ${pair}: ${error.message}`);
+      }
+    }
+
+    throw new Error(`No tradeable pair found for ${from}/${to} on ${exchangeType}`);
+  }
+
+  private async executeNexoSwap(
+    from: string,
+    to: string,
+    amount: number,
+    userId: string,
+  ): Promise<SwapExecutionResultDto> {
+    const credentials = await this.credentialsService.findActiveByUser(userId);
+    const nexoCred = credentials.find(
+      (c) => c.exchange === ExchangeType.NEXO_PRO,
+    );
+    if (!nexoCred) {
+      throw new Error('No Nexo Pro credentials found');
+    }
+
+    const decrypted = this.credentialsService.getDecryptedCredentials(nexoCred);
+    const client = new NexoClient({
+      apiKey: decrypted.apiKey,
+      apiSecret: decrypted.apiSecret,
+    });
+
+    // Try direct pair (sell FROM)
+    const directPair = `${from}/${to}`;
+    try {
+      const result = await client.placeOrder({
+        pair: directPair,
+        side: 'sell',
+        type: 'market',
+        quantity: amount.toString(),
+      });
+      return {
+        exchange: ExchangeType.NEXO_PRO,
+        orderId: result.orderId,
+        pair: directPair,
+        side: 'sell',
+        status: 'closed',
+        amount,
+        filled: amount,
+        price: 0,
+        cost: 0,
+        fee: null,
+        feeAsset: null,
+      };
+    } catch {
+      // Try reverse pair
+    }
+
+    const reversePair = `${to}/${from}`;
+    const result = await client.placeOrder({
+      pair: reversePair,
+      side: 'buy',
+      type: 'market',
+      quantity: amount.toString(),
+    });
+    return {
+      exchange: ExchangeType.NEXO_PRO,
+      orderId: result.orderId,
+      pair: reversePair,
+      side: 'buy',
+      status: 'closed',
+      amount,
+      filled: amount,
+      price: 0,
+      cost: 0,
+      fee: null,
+      feeAsset: null,
+    };
+  }
+
+  private mapCcxtOrder(order: any, exchange: ExchangeType): SwapExecutionResultDto {
+    return {
+      exchange,
+      orderId: order.id || '',
+      pair: order.symbol || '',
+      side: order.side || '',
+      status: order.status || 'closed',
+      amount: order.amount || 0,
+      filled: order.filled || 0,
+      price: order.average || order.price || 0,
+      cost: order.cost || 0,
+      fee: order.fee?.cost ?? null,
+      feeAsset: order.fee?.currency ?? null,
+    };
   }
 
   private createPublicCcxtClient(exchange: ExchangeType): any | null {

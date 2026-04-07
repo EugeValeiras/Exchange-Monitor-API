@@ -152,4 +152,19 @@ export class NexoClient {
     );
     return response.data;
   }
+
+  async placeOrder(params: {
+    pair: string;
+    side: 'buy' | 'sell';
+    type: 'market' | 'limit';
+    quantity: string;
+    price?: string;
+  }): Promise<{ orderId: string }> {
+    const response = await this.client.post<{ orderId: string }>(
+      '/api/v1/orders',
+      params,
+      { headers: this.getAuthHeaders() },
+    );
+    return response.data;
+  }
 }
