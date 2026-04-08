@@ -824,6 +824,13 @@ export class PricesService {
             enableRateLimit: true,
           });
           break;
+        case ExchangeType.COINBASE:
+          client = new ccxtLib.coinbase({
+            apiKey: decrypted.apiKey,
+            secret: decrypted.apiSecret.replace(/\\n/g, '\n'),
+            enableRateLimit: true,
+          });
+          break;
         default:
           return null;
       }
@@ -926,6 +933,13 @@ export class PricesService {
         client = new ccxtLib.kraken({
           apiKey: decrypted.apiKey,
           secret: decrypted.apiSecret,
+          enableRateLimit: true,
+        });
+        break;
+      case ExchangeType.COINBASE:
+        client = new ccxtLib.coinbase({
+          apiKey: decrypted.apiKey,
+          secret: decrypted.apiSecret.replace(/\\n/g, '\n'),
           enableRateLimit: true,
         });
         break;
@@ -1071,6 +1085,8 @@ export class PricesService {
       }
       case ExchangeType.KRAKEN:
         return new ccxtLib.kraken({ enableRateLimit: true });
+      case ExchangeType.COINBASE:
+        return new ccxtLib.coinbase({ enableRateLimit: true });
       default:
         return null;
     }
