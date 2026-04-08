@@ -12,9 +12,12 @@ export class CoinbaseAdapter extends BaseExchangeAdapter {
 
   constructor(apiKey: string, apiSecret: string) {
     super();
+    // Coinbase CDP keys use PEM format with real newlines.
+    // When pasted from the UI, literal "\n" must be converted to actual newlines.
+    const normalizedSecret = apiSecret.replace(/\\n/g, '\n');
     this.client = new ccxt.coinbase({
       apiKey,
-      secret: apiSecret,
+      secret: normalizedSecret,
       enableRateLimit: true,
     });
   }
