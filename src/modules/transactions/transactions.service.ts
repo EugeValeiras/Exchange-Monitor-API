@@ -578,6 +578,7 @@ export class TransactionsService {
       binance: 'Binance',
       'binance-futures': 'Binance Futures',
       kraken: 'Kraken',
+      coinbase: 'Coinbase',
       'nexo-pro': 'Nexo Pro',
       'nexo-manual': 'Nexo',
     };

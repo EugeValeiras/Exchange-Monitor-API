@@ -57,7 +57,7 @@ export class PricesService {
     }
 
     // Try to get price from any available exchange
-    const exchanges = [ExchangeType.BINANCE, ExchangeType.KRAKEN];
+    const exchanges = [ExchangeType.BINANCE, ExchangeType.KRAKEN, ExchangeType.COINBASE];
 
     for (const exchange of exchanges) {
       try {
@@ -444,6 +444,9 @@ export class PricesService {
       case ExchangeType.KRAKEN:
         client = new ccxt.kraken({ enableRateLimit: true });
         break;
+      case ExchangeType.COINBASE:
+        client = new ccxt.coinbase({ enableRateLimit: true });
+        break;
       default:
         return null;
     }
@@ -471,6 +474,7 @@ export class PricesService {
     const exchangeConfigs: { type: ExchangeType; label: string }[] = [
       { type: ExchangeType.BINANCE, label: 'Binance' },
       { type: ExchangeType.KRAKEN, label: 'Kraken' },
+      { type: ExchangeType.COINBASE, label: 'Coinbase' },
     ];
 
     const results: SwapExchangeResultDto[] = [];

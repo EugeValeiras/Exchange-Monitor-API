@@ -107,6 +107,8 @@ export class MarketsCacheService {
       }
       case ExchangeType.KRAKEN:
         return new ccxt.kraken({ enableRateLimit: true });
+      case ExchangeType.COINBASE:
+        return new ccxt.coinbase({ enableRateLimit: true });
       default:
         return null;
     }

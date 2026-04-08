@@ -4,6 +4,7 @@ import { IExchangeAdapter } from '../../common/interfaces/exchange-adapter.inter
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { KrakenAdapter } from './kraken/kraken.adapter';
 import { BinanceAdapter } from './binance/binance.adapter';
+import { CoinbaseAdapter } from './coinbase/coinbase.adapter';
 import { NexoAdapter } from './nexo/nexo.adapter';
 import {
   NexoManualAdapter,
@@ -31,6 +32,8 @@ export class ExchangeFactoryService {
         const binanceHostname = this.configService.get<string>('BINANCE_HOSTNAME');
         return new BinanceAdapter(apiKey, apiSecret, binanceHostname);
       }
+      case ExchangeType.COINBASE:
+        return new CoinbaseAdapter(apiKey, apiSecret);
       case ExchangeType.NEXO_PRO:
         return new NexoAdapter(apiKey, apiSecret);
       case ExchangeType.NEXO_MANUAL:
