@@ -6,6 +6,17 @@ import {
   IPrice,
 } from '../../../common/interfaces/exchange-adapter.interface';
 
+interface KrakenRawTransfer {
+  asset: string;
+  refid?: string;
+  txid?: string;
+  amount: string;
+  fee?: string;
+  time: number | string;
+  status?: string;
+  method?: string;
+}
+
 export class KrakenAdapter extends BaseExchangeAdapter {
   readonly exchangeName = 'kraken';
   private client: ccxt.kraken;
@@ -59,19 +70,9 @@ export class KrakenAdapter extends BaseExchangeAdapter {
 
   async fetchDeposits(since?: Date): Promise<ITransaction[]> {
     try {
-      const sinceTimestamp = since ? since.getTime() : undefined;
-      const deposits = await this.client.fetchDeposits(undefined, sinceTimestamp);
-
-      return deposits.map((deposit) => ({
-        externalId: deposit.id || deposit.txid || '',
-        type: 'deposit' as const,
-        asset: this.normalizeAsset(deposit.currency),
-        amount: deposit.amount,
-        fee: deposit.fee?.cost,
-        feeAsset: deposit.fee?.currency,
-        timestamp: new Date(deposit.timestamp),
-        rawData: deposit.info as Record<string, unknown>,
-      }));
+      const deposits = await this.fetchTransfersWithCursor('deposit', since);
+      this.logger.log(`Fetched ${deposits.length} deposits from Kraken`);
+      return deposits;
     } catch (error) {
       this.handleError(error as Error, 'fetchDeposits');
     }
@@ -79,25 +80,95 @@ export class KrakenAdapter extends BaseExchangeAdapter {
 
   async fetchWithdrawals(since?: Date): Promise<ITransaction[]> {
     try {
-      const sinceTimestamp = since ? since.getTime() : undefined;
-      const withdrawals = await this.client.fetchWithdrawals(
-        undefined,
-        sinceTimestamp,
-      );
-
-      return withdrawals.map((withdrawal) => ({
-        externalId: withdrawal.id || withdrawal.txid || '',
-        type: 'withdrawal' as const,
-        asset: this.normalizeAsset(withdrawal.currency),
-        amount: withdrawal.amount,
-        fee: withdrawal.fee?.cost,
-        feeAsset: withdrawal.fee?.currency,
-        timestamp: new Date(withdrawal.timestamp),
-        rawData: withdrawal.info as Record<string, unknown>,
-      }));
+      const withdrawals = await this.fetchTransfersWithCursor('withdrawal', since);
+      this.logger.log(`Fetched ${withdrawals.length} withdrawals from Kraken`);
+      return withdrawals;
     } catch (error) {
       this.handleError(error as Error, 'fetchWithdrawals');
     }
+  }
+
+  /**
+   * Kraken's DepositStatus / WithdrawStatus endpoints paginate via an opaque
+   * `cursor`. CCXT's fetchDeposits doesn't expose cursor pagination at all and
+   * its fetchWithdrawals paginate mode changes the response shape. To get the
+   * full history for both in a consistent way we call the raw private methods
+   * and loop until `next_cursor` is empty.
+   */
+  private async fetchTransfersWithCursor(
+    type: 'deposit' | 'withdrawal',
+    since?: Date,
+  ): Promise<ITransaction[]> {
+    const method =
+      type === 'deposit' ? 'privatePostDepositStatus' : 'privatePostWithdrawStatus';
+    const pageKey = type === 'deposit' ? 'deposits' : 'withdrawals';
+
+    const baseParams: Record<string, unknown> = {};
+    if (since) {
+      baseParams.start = Math.floor(since.getTime() / 1000).toString();
+    }
+
+    const results: ITransaction[] = [];
+    const seenIds = new Set<string>();
+    // Kraken accepts `cursor: true` on the first call; later calls pass the
+    // opaque `next_cursor` string returned in the previous response.
+    let cursor: string | boolean = true;
+    let page = 0;
+
+    while (cursor) {
+      const response = (await (
+        this.client as unknown as Record<string, (p: unknown) => Promise<unknown>>
+      )[method]({ ...baseParams, cursor })) as {
+        result?:
+          | KrakenRawTransfer[]
+          | ({ next_cursor?: string } & Record<string, KrakenRawTransfer[]>);
+      };
+
+      const result = response?.result;
+      const entries: KrakenRawTransfer[] = Array.isArray(result)
+        ? result
+        : (result?.[pageKey] as KrakenRawTransfer[] | undefined) ?? [];
+
+      for (const entry of entries) {
+        const mapped = this.mapRawTransfer(entry, type);
+        // Defensive de-dup in case Kraken returns overlapping pages.
+        const key = mapped.externalId || `${entry.refid}-${entry.time}`;
+        if (seenIds.has(key)) continue;
+        seenIds.add(key);
+        results.push(mapped);
+      }
+
+      this.logger.debug(
+        `fetchTransfersWithCursor ${type} page=${page} returned ${entries.length} entries`,
+      );
+      page += 1;
+
+      // Legacy shape (plain array) means no pagination — we're done.
+      if (Array.isArray(result)) break;
+      const nextCursor = result?.next_cursor;
+      if (!nextCursor || entries.length === 0) break;
+      cursor = nextCursor;
+    }
+
+    return results;
+  }
+
+  private mapRawTransfer(
+    entry: KrakenRawTransfer,
+    type: 'deposit' | 'withdrawal',
+  ): ITransaction {
+    const asset = this.normalizeAsset(entry.asset);
+    const feeValue = entry.fee !== undefined ? parseFloat(entry.fee) : 0;
+    return {
+      externalId: entry.refid || entry.txid || '',
+      type,
+      asset,
+      amount: parseFloat(entry.amount),
+      fee: feeValue > 0 ? feeValue : undefined,
+      feeAsset: feeValue > 0 ? asset : undefined,
+      timestamp: new Date(Number(entry.time) * 1000),
+      rawData: entry as unknown as Record<string, unknown>,
+    };
   }
 
   async fetchTrades(since?: Date, symbol?: string, symbols?: string[]): Promise<ITransaction[]> {
@@ -257,7 +328,25 @@ export class KrakenAdapter extends BaseExchangeAdapter {
       }
 
       const sinceTimestamp = since ? since.getTime() : undefined;
-      const ledgerEntries = await this.client.fetchLedger(undefined, sinceTimestamp);
+
+      // Kraken's Ledgers endpoint returns at most 50 entries per call and
+      // paginates via the `ofs` offset parameter. CCXT's fetchLedger forwards
+      // extra params to the request, so we loop until we get a short page.
+      const pageSize = 50;
+      const ledgerEntries: ccxt.LedgerEntry[] = [];
+      for (let ofs = 0; ; ofs += pageSize) {
+        const page = await this.client.fetchLedger(
+          undefined,
+          sinceTimestamp,
+          undefined,
+          { ofs },
+        );
+        ledgerEntries.push(...page);
+        this.logger.debug(
+          `fetchLedger page ofs=${ofs} returned ${page.length} entries`,
+        );
+        if (page.length < pageSize) break;
+      }
 
       this.logger.log(`Fetched ${ledgerEntries.length} ledger entries from Kraken`);
 
