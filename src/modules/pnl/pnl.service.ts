@@ -807,10 +807,7 @@ export class PnlService {
   // ==================== PRIVATE METHODS ====================
 
   private isAcquisition(tx: TransactionDocument): boolean {
-    return (
-      tx.type === TransactionType.INTEREST ||
-      (tx.type === TransactionType.TRADE && tx.side === 'buy')
-    );
+    return tx.type === TransactionType.TRADE && tx.side === 'buy';
   }
 
   private isDisposal(tx: TransactionDocument): boolean {
