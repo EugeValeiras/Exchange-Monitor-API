@@ -48,11 +48,7 @@ export class PnlService {
 
     // Determine if this adds to cost basis or realizes gains
     if (this.isAcquisition(tx)) {
-      // Get price - use transaction price if available, otherwise fetch historical
-      let pricePerUnit = tx.price;
-      if (!pricePerUnit || pricePerUnit === 0) {
-        pricePerUnit = await this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
-      }
+      const pricePerUnit = await this.resolveUsdPrice(tx);
 
       await this.addLot(
         userId,
@@ -65,11 +61,7 @@ export class PnlService {
         tx.type,
       );
     } else if (this.isDisposal(tx)) {
-      // Get price - use transaction price if available, otherwise fetch historical
-      let pricePerUnit = tx.price;
-      if (!pricePerUnit || pricePerUnit === 0) {
-        pricePerUnit = await this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
-      }
+      const pricePerUnit = await this.resolveUsdPrice(tx);
 
       await this.consumeLotsFIFO(
         userId,
@@ -805,6 +797,43 @@ export class PnlService {
   }
 
   // ==================== PRIVATE METHODS ====================
+
+  private static readonly USD_STABLECOINS = ['USDT', 'USDC', 'USD', 'BUSD', 'DAI', 'TUSD', 'USDX'];
+
+  /**
+   * Resolve the USD price per unit for a transaction.
+   * If priceAsset is a USD stablecoin (or not set), uses tx.price directly.
+   * Otherwise, converts by fetching the historical USD price of the priceAsset.
+   */
+  private async resolveUsdPrice(tx: TransactionDocument): Promise<number> {
+    const priceAsset = tx.priceAsset?.toUpperCase();
+    const hasDirectPrice = tx.price && tx.price > 0;
+    const isUsdPair = !priceAsset || PnlService.USD_STABLECOINS.includes(priceAsset);
+
+    if (hasDirectPrice && isUsdPair) {
+      return tx.price;
+    }
+
+    if (hasDirectPrice && !isUsdPair) {
+      // Price is in a non-USD asset (e.g., MONAD/NEXO) — convert to USD
+      const priceAssetUsdRate = await this.getHistoricalPriceForTransaction(priceAsset, tx.timestamp);
+
+      if (priceAssetUsdRate > 0) {
+        const usdPrice = tx.price * priceAssetUsdRate;
+        this.logger.debug(
+          `Converted ${tx.asset} price from ${tx.price} ${priceAsset} to $${usdPrice} USD (${priceAsset} @ $${priceAssetUsdRate})`,
+        );
+        return usdPrice;
+      }
+
+      this.logger.warn(
+        `Could not get USD rate for ${priceAsset} on ${tx.timestamp.toISOString().split('T')[0]}, falling back to asset historical price`,
+      );
+    }
+
+    // Fallback: fetch historical USD price of the asset directly
+    return this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
+  }
 
   private isAcquisition(tx: TransactionDocument): boolean {
     return tx.type === TransactionType.TRADE && tx.side === 'buy';
