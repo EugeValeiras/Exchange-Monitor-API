@@ -10,8 +10,13 @@ import { PricesService } from './prices.service';
 import { PriceResponseDto, ConvertResponseDto } from './dto/price-response.dto';
 import { SwapPreviewResponseDto } from './dto/swap-preview.dto';
 import { ExecuteSwapDto, SwapExecutionResultDto } from './dto/swap-execute.dto';
+import {
+  RawOrderbookResponseDto,
+  RawTickerResponseDto,
+} from './dto/raw-price.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { ExchangeType } from '../../common/constants/exchanges.constant';
 
 @ApiTags('prices')
 @Controller('prices')
@@ -78,6 +83,57 @@ export class PricesController {
     @CurrentUser('userId') userId: string,
   ): Promise<ConvertResponseDto> {
     return this.pricesService.convert(from, to, Number(amount), userId);
+  }
+
+  @Get('raw/:exchange/orderbook')
+  @ApiOperation({
+    summary: 'Raw order book from an exchange via CCXT (bypasses cache)',
+    description:
+      'Returns the raw order book for a symbol from Binance/Kraken/Coinbase. Public by default. ' +
+      'Set `asMe=true` to use the authenticated user\'s API credentials for that exchange.',
+  })
+  @ApiQuery({ name: 'symbol', example: 'BTC/USDT' })
+  @ApiQuery({ name: 'depth', required: false, example: 20, description: '1–100 (default 20)' })
+  @ApiQuery({ name: 'asMe', required: false, example: 'false' })
+  @ApiResponse({ status: 200, type: RawOrderbookResponseDto })
+  @ApiResponse({ status: 400, description: 'Exchange not supported or CCXT fetch failed' })
+  @ApiResponse({ status: 404, description: 'asMe=true and no credential for this exchange' })
+  async getRawOrderbook(
+    @Param('exchange') exchange: string,
+    @Query('symbol') symbol: string,
+    @Query('depth') depth: string | undefined,
+    @Query('asMe') asMe: string | undefined,
+    @CurrentUser('userId') userId: string,
+  ): Promise<RawOrderbookResponseDto> {
+    return this.pricesService.getRawOrderbook(exchange as ExchangeType, symbol, {
+      userId,
+      asMe: asMe === 'true',
+      depth: depth ? parseInt(depth, 10) : undefined,
+    });
+  }
+
+  @Get('raw/:exchange')
+  @ApiOperation({
+    summary: 'Raw ticker from an exchange via CCXT (bypasses cache)',
+    description:
+      'Returns the raw ticker for a symbol from Binance/Kraken/Coinbase. Public by default. ' +
+      'Set `asMe=true` to use the authenticated user\'s API credentials (reflects their fee tier, rate limits, etc.).',
+  })
+  @ApiQuery({ name: 'symbol', example: 'BTC/USDT' })
+  @ApiQuery({ name: 'asMe', required: false, example: 'false' })
+  @ApiResponse({ status: 200, type: RawTickerResponseDto })
+  @ApiResponse({ status: 400, description: 'Exchange not supported or CCXT fetch failed' })
+  @ApiResponse({ status: 404, description: 'asMe=true and no credential for this exchange' })
+  async getRawTicker(
+    @Param('exchange') exchange: string,
+    @Query('symbol') symbol: string,
+    @Query('asMe') asMe: string | undefined,
+    @CurrentUser('userId') userId: string,
+  ): Promise<RawTickerResponseDto> {
+    return this.pricesService.getRawTicker(exchange as ExchangeType, symbol, {
+      userId,
+      asMe: asMe === 'true',
+    });
   }
 
   @Get(':symbol')

@@ -46,6 +46,11 @@ export class PnlService {
   async processTransaction(tx: TransactionDocument): Promise<void> {
     const userId = tx.userId.toString();
 
+    // Build trade detail for lot metadata
+    const tradeDetail = tx.type === TransactionType.TRADE
+      ? { pair: tx.pair, priceAsset: tx.priceAsset, originalPrice: tx.price }
+      : undefined;
+
     // Determine if this adds to cost basis or realizes gains
     if (this.isAcquisition(tx)) {
       const pricePerUnit = await this.resolveUsdPrice(tx);
@@ -59,6 +64,7 @@ export class PnlService {
         tx._id.toString(),
         tx.exchange,
         tx.type,
+        tradeDetail,
       );
     } else if (this.isDisposal(tx)) {
       const pricePerUnit = await this.resolveUsdPrice(tx);
@@ -71,6 +77,80 @@ export class PnlService {
         tx.timestamp,
         tx._id.toString(),
         tx.exchange,
+      );
+    }
+
+    // Crypto/crypto trades have TWO sides. The base asset (tx.asset) is
+    // handled above; here we process the quote asset (tx.priceAsset) so the
+    // cost basis of e.g. MON gets consumed when it's spent to buy NEXO.
+    // Skip when priceAsset is a USD stablecoin (or missing) — those don't
+    // track cost basis.
+    await this.processCounterSide(tx);
+  }
+
+  /**
+   * When a trade is crypto/crypto (priceAsset is not a stablecoin), the
+   * main processing above only touched tx.asset. We must also:
+   *  - On BUY  (asset A bought with quote B): DISPOSE of \`amount * price\` of B
+   *  - On SELL (asset A sold for quote B):    ACQUIRE \`amount * price\` of B
+   */
+  private async processCounterSide(tx: TransactionDocument): Promise<void> {
+    if (tx.type !== TransactionType.TRADE) return;
+    const priceAsset = tx.priceAsset?.toUpperCase();
+    if (!priceAsset) return;
+    if (PnlService.USD_STABLECOINS.includes(priceAsset)) return;
+    if (!tx.price || tx.price <= 0 || !tx.amount || tx.amount <= 0) return;
+
+    const userId = tx.userId.toString();
+    const counterAmount = tx.amount * tx.price;
+
+    // Historical USD price of the quote asset at the time of the trade.
+    const counterUsdPrice = await this.getHistoricalPriceForTransaction(
+      priceAsset,
+      tx.timestamp,
+    );
+    if (!counterUsdPrice || counterUsdPrice <= 0) {
+      this.logger.warn(
+        `No historical USD price for counter asset ${priceAsset} on ` +
+          `${tx.timestamp.toISOString()} — counter-side of trade ${tx._id.toString()} skipped`,
+      );
+      return;
+    }
+
+    // The lot/realized records require a valid ObjectId for transactionId.
+    // Reuse the source tx._id — the metadata fields (asset/exchange/source)
+    // make the counter-side record distinguishable from the main side.
+    const counterTxObjectId = tx._id.toString();
+
+    if (tx.side === 'buy') {
+      // Spent counterAmount of priceAsset → DISPOSAL
+      await this.consumeLotsFIFO(
+        userId,
+        priceAsset,
+        counterAmount,
+        counterUsdPrice,
+        tx.timestamp,
+        counterTxObjectId,
+        tx.exchange,
+      );
+      this.logger.log(
+        `[counter] Disposed ${counterAmount} ${priceAsset} (cost of ${tx.asset} buy) @ $${counterUsdPrice}`,
+      );
+    } else if (tx.side === 'sell') {
+      // Received counterAmount of priceAsset → ACQUISITION
+      await this.addLot(
+        userId,
+        priceAsset,
+        counterAmount,
+        counterUsdPrice,
+        tx.timestamp,
+        counterTxObjectId,
+        tx.exchange,
+        'trade-counter',
+        { pair: tx.pair, priceAsset: tx.asset, originalPrice: 1 / tx.price },
+      );
+      this.logger.log(
+        `[counter] Acquired ${counterAmount} ${priceAsset} (proceeds of ${tx.asset} sell) @ $${counterUsdPrice}`,
       );
     }
   }
@@ -414,6 +494,9 @@ export class PnlService {
       remainingAmount: lot.remainingAmount,
       costPerUnit: lot.costPerUnit,
       totalCost: lot.originalAmount * lot.costPerUnit,
+      pair: lot.pair,
+      priceAsset: lot.priceAsset,
+      originalPrice: lot.originalPrice,
     }));
 
     return { data, total, page, limit, totalPages };
@@ -852,6 +935,7 @@ export class PnlService {
     transactionId: string,
     exchange: string,
     source: string,
+    tradeDetail?: { pair?: string; priceAsset?: string; originalPrice?: number },
   ): Promise<CostBasisLotDocument> {
     const lot = new this.costBasisLotModel({
       userId: new Types.ObjectId(userId),
@@ -863,6 +947,9 @@ export class PnlService {
       transactionId: new Types.ObjectId(transactionId),
       exchange,
       source,
+      ...(tradeDetail?.pair && { pair: tradeDetail.pair }),
+      ...(tradeDetail?.priceAsset && { priceAsset: tradeDetail.priceAsset }),
+      ...(tradeDetail?.originalPrice && { originalPrice: tradeDetail.originalPrice }),
     });
 
     this.logger.debug(

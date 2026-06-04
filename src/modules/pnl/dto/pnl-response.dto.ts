@@ -164,6 +164,15 @@ export class CostBasisLotDto {
 
   @ApiProperty()
   totalCost: number;
+
+  @ApiProperty({ required: false })
+  pair?: string;
+
+  @ApiProperty({ required: false })
+  priceAsset?: string;
+
+  @ApiProperty({ required: false })
+  originalPrice?: number;
 }
 
 export class PaginatedCostBasisLotsDto {

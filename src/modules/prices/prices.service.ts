@@ -1,4 +1,13 @@
-import { Injectable, Logger, Optional, Inject, forwardRef } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  Inject,
+  forwardRef,
+  BadRequestException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExchangeCredentialsService } from '../exchange-credentials/exchange-credentials.service';
 import { SettingsService } from '../settings/settings.service';
@@ -12,7 +21,17 @@ import {
   SwapExchangeResultDto,
 } from './dto/swap-preview.dto';
 import { SwapExecutionResultDto } from './dto/swap-execute.dto';
+import {
+  RawOrderbookResponseDto,
+  RawTickerResponseDto,
+} from './dto/raw-price.dto';
 import { PriceAggregatorService } from './websocket/price-aggregator.service';
+
+const CCXT_PUBLIC_EXCHANGES: ExchangeType[] = [
+  ExchangeType.BINANCE,
+  ExchangeType.KRAKEN,
+  ExchangeType.COINBASE,
+];
 
 @Injectable()
 export class PricesService {
@@ -1068,6 +1087,154 @@ export class PricesService {
       fee: order.fee?.cost ?? null,
       feeAsset: order.fee?.currency ?? null,
     };
+  }
+
+  // ── Raw CCXT passthrough (bypasses all caches) ────────────────
+
+  async getRawTicker(
+    exchange: ExchangeType,
+    symbol: string,
+    opts: { userId?: string; asMe?: boolean } = {},
+  ): Promise<RawTickerResponseDto> {
+    const normalized = this.normalizeRawSymbol(symbol);
+    const client = await this.getRawClient(exchange, opts);
+    try {
+      const ticker = await client.fetchTicker(normalized);
+      return {
+        exchange,
+        symbol: ticker.symbol ?? normalized,
+        timestamp: new Date(ticker.timestamp ?? Date.now()),
+        datetime: ticker.datetime ?? null,
+        last: ticker.last ?? null,
+        close: ticker.close ?? null,
+        open: ticker.open ?? null,
+        high: ticker.high ?? null,
+        low: ticker.low ?? null,
+        bid: ticker.bid ?? null,
+        ask: ticker.ask ?? null,
+        bidVolume: ticker.bidVolume ?? null,
+        askVolume: ticker.askVolume ?? null,
+        vwap: ticker.vwap ?? null,
+        baseVolume: ticker.baseVolume ?? null,
+        quoteVolume: ticker.quoteVolume ?? null,
+        change: ticker.change ?? null,
+        percentage: ticker.percentage ?? null,
+        source: opts.asMe ? 'authenticated' : 'public',
+        info: ticker.info ?? null,
+      };
+    } catch (err) {
+      throw new BadRequestException(
+        `Failed to fetch ticker ${normalized} on ${exchange}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  async getRawOrderbook(
+    exchange: ExchangeType,
+    symbol: string,
+    opts: { depth?: number; userId?: string; asMe?: boolean } = {},
+  ): Promise<RawOrderbookResponseDto> {
+    const normalized = this.normalizeRawSymbol(symbol);
+    const depth = Math.max(1, Math.min(opts.depth ?? 20, 100));
+    const client = await this.getRawClient(exchange, opts);
+    try {
+      const book = await client.fetchOrderBook(normalized, depth);
+      return {
+        exchange,
+        symbol: normalized,
+        timestamp: new Date(book.timestamp ?? Date.now()),
+        datetime: book.datetime ?? null,
+        nonce: book.nonce ?? null,
+        bids: (book.bids ?? []) as [number, number][],
+        asks: (book.asks ?? []) as [number, number][],
+        source: opts.asMe ? 'authenticated' : 'public',
+      };
+    } catch (err) {
+      throw new BadRequestException(
+        `Failed to fetch order book ${normalized} on ${exchange}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  private normalizeRawSymbol(symbol: string): string {
+    if (!symbol) {
+      throw new BadRequestException('symbol is required');
+    }
+    const s = symbol.trim().toUpperCase();
+    // Accept BTC-USDT and convert to BTC/USDT for CCXT
+    return s.includes('/') ? s : s.replace('-', '/');
+  }
+
+  private async getRawClient(
+    exchange: ExchangeType,
+    opts: { userId?: string; asMe?: boolean },
+  ): Promise<any> {
+    if (!CCXT_PUBLIC_EXCHANGES.includes(exchange)) {
+      throw new BadRequestException(
+        `Exchange '${exchange}' is not supported for raw CCXT queries. Supported: ${CCXT_PUBLIC_EXCHANGES.join(', ')}`,
+      );
+    }
+    if (!opts.asMe) {
+      const client = this.createPublicCcxtClient(exchange);
+      if (!client) {
+        throw new BadRequestException(
+          `Cannot create public client for ${exchange}`,
+        );
+      }
+      return client;
+    }
+    if (!opts.userId) {
+      throw new UnauthorizedException('asMe=true requires an authenticated user');
+    }
+    const credentials = await this.credentialsService.findActiveByUser(
+      opts.userId,
+    );
+    const cred = credentials.find((c) => c.exchange === exchange);
+    if (!cred) {
+      throw new NotFoundException(
+        `No active credential for ${exchange}. Add one via POST /credentials first.`,
+      );
+    }
+    const decrypted = this.credentialsService.getDecryptedCredentials(cred);
+    return this.createAuthenticatedCcxtClient(exchange, decrypted);
+  }
+
+  private createAuthenticatedCcxtClient(
+    exchange: ExchangeType,
+    decrypted: { apiKey: string; apiSecret: string; passphrase?: string },
+  ): any {
+    const ccxtLib = require('ccxt');
+    switch (exchange) {
+      case ExchangeType.BINANCE: {
+        const config: any = {
+          apiKey: decrypted.apiKey,
+          secret: decrypted.apiSecret,
+          enableRateLimit: true,
+        };
+        if (this.binanceHostname === 'binance.us') {
+          return new ccxtLib.binanceus(config);
+        }
+        if (this.binanceHostname) config.hostname = this.binanceHostname;
+        return new ccxtLib.binance(config);
+      }
+      case ExchangeType.KRAKEN:
+        return new ccxtLib.kraken({
+          apiKey: decrypted.apiKey,
+          secret: decrypted.apiSecret,
+          enableRateLimit: true,
+        });
+      case ExchangeType.COINBASE:
+        return new ccxtLib.coinbase({
+          apiKey: decrypted.apiKey,
+          secret: decrypted.apiSecret.replace(/\\n/g, '\n'),
+          password: decrypted.passphrase,
+          enableRateLimit: true,
+        });
+      default:
+        throw new BadRequestException(
+          `Exchange ${exchange} not supported for authenticated raw queries`,
+        );
+    }
   }
 
   private createPublicCcxtClient(exchange: ExchangeType): any | null {

@@ -48,6 +48,7 @@
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.3",
+    "technicalindicators": "^3.1.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {

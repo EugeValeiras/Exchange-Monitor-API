@@ -26,6 +26,15 @@ export interface IPrice {
   timestamp: Date;
 }
 
+export interface IOHLCVCandle {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
 export interface IExchangeAdapter {
   readonly exchangeName: string;
 
@@ -37,4 +46,5 @@ export interface IExchangeAdapter {
   fetchLedger?(since?: Date, symbols?: string[]): Promise<ITransaction[]>;
   fetchPrice(symbol: string): Promise<IPrice>;
   fetchPrices(symbols: string[]): Promise<IPrice[]>;
+  fetchOHLCV?(symbol: string, timeframe: string, limit?: number): Promise<IOHLCVCandle[]>;
 }

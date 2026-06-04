@@ -31,6 +31,8 @@ export class PricesGateway
   server: Server;
 
   private configuredSymbols: Set<string> = new Set();
+  private configuredByBase: Map<string, string[]> = new Map();
+  private configuredToRequested: Map<string, Set<string>> = new Map();
 
   constructor(
     private readonly priceAggregator: PriceAggregatorService,
@@ -44,11 +46,47 @@ export class PricesGateway
     if (!this.settingsService) return;
 
     try {
-      this.configuredSymbols = await this.settingsService.getConfiguredSymbolsSet();
+      const byExchange = await this.settingsService.getAllConfiguredSymbolsByExchange();
+      const all = new Set<string>();
+      for (const symbols of Object.values(byExchange)) {
+        for (const s of symbols) all.add(s);
+      }
+      this.configuredSymbols = all;
+      this.rebuildConfiguredByBase();
+      this.pruneStaleMappings();
       this.logger.log(`Loaded ${this.configuredSymbols.size} configured symbols for gateway`);
     } catch (error) {
       this.logger.error(`Failed to load configured symbols: ${error.message}`);
     }
+  }
+
+  private rebuildConfiguredByBase(): void {
+    this.configuredByBase = new Map();
+    for (const symbol of this.configuredSymbols) {
+      const base = symbol.split('/')[0];
+      const existing = this.configuredByBase.get(base);
+      if (existing) {
+        existing.push(symbol);
+      } else {
+        this.configuredByBase.set(base, [symbol]);
+      }
+    }
+  }
+
+  private pruneStaleMappings(): void {
+    for (const configured of this.configuredToRequested.keys()) {
+      if (!this.configuredSymbols.has(configured)) {
+        this.configuredToRequested.delete(configured);
+      }
+    }
+  }
+
+  private resolveRequestedSymbol(requested: string): string[] {
+    if (this.configuredSymbols.has(requested)) {
+      return [requested];
+    }
+    const base = requested.split('/')[0];
+    return this.configuredByBase.get(base) ?? [];
   }
 
   @OnEvent('settings.symbols.updated')
@@ -82,33 +120,64 @@ export class PricesGateway
   ): void {
     this.logger.log(`Client ${client.id} subscribing to: ${symbols.join(', ')}`);
 
-    // Join room for each symbol (client can listen to any symbol)
-    symbols.forEach((symbol) => {
-      client.join(`price:${symbol}`);
-    });
+    // Resolve each requested symbol to the configured symbols that share its base asset.
+    // This lets clients request MON/USDT and receive updates from a configured MON/USDT:USDT perp feed.
+    const toAggregator = new Set<string>();
+    const unresolved: string[] = [];
+    const noConfig = this.configuredSymbols.size === 0;
 
-    // Only subscribe to symbols that are configured in global settings
-    // This prevents dynamic subscription to unconfigured symbols
-    const symbolsToSubscribe = this.configuredSymbols.size > 0
-      ? symbols.filter((s) => this.configuredSymbols.has(s))
-      : symbols; // If no configured symbols, allow all (fallback)
+    for (const requested of symbols) {
+      client.join(`price:${requested}`);
 
-    if (symbolsToSubscribe.length > 0 && symbolsToSubscribe.length < symbols.length) {
-      const skipped = symbols.filter((s) => !this.configuredSymbols.has(s));
-      this.logger.debug(`Skipping unconfigured symbols: ${skipped.join(', ')}`);
-    }
-
-    if (symbolsToSubscribe.length > 0) {
-      this.priceAggregator.subscribeToSymbols(symbolsToSubscribe);
-    }
-
-    // Send current prices for subscribed symbols
-    symbols.forEach((symbol) => {
-      const price = this.priceAggregator.getLatestPrice(symbol);
-      if (price) {
-        client.emit('price:update', price);
+      if (noConfig) {
+        toAggregator.add(requested);
+        continue;
       }
-    });
+
+      const resolved = this.resolveRequestedSymbol(requested);
+      if (resolved.length === 0) {
+        unresolved.push(requested);
+        continue;
+      }
+
+      for (const configured of resolved) {
+        toAggregator.add(configured);
+        if (configured !== requested) {
+          let set = this.configuredToRequested.get(configured);
+          if (!set) {
+            set = new Set();
+            this.configuredToRequested.set(configured, set);
+          }
+          set.add(requested);
+        }
+      }
+    }
+
+    if (unresolved.length > 0) {
+      this.logger.debug(`Skipping unconfigured symbols: ${unresolved.join(', ')}`);
+    }
+
+    if (toAggregator.size > 0) {
+      this.priceAggregator.subscribeToSymbols(Array.from(toAggregator));
+    }
+
+    // Send current prices for requested symbols, re-labeled from mapped configured feeds if needed
+    for (const requested of symbols) {
+      const direct = this.priceAggregator.getLatestPrice(requested);
+      if (direct) {
+        client.emit('price:update', direct);
+        continue;
+      }
+      if (noConfig) continue;
+      const resolved = this.resolveRequestedSymbol(requested);
+      for (const configured of resolved) {
+        const latest = this.priceAggregator.getLatestPrice(configured);
+        if (latest) {
+          client.emit('price:update', { ...latest, symbol: requested });
+          break;
+        }
+      }
+    }
   }
 
   @SubscribeMessage('unsubscribe')
@@ -134,6 +203,17 @@ export class PricesGateway
   handlePriceUpdate(price: AggregatedPrice): void {
     // Broadcast to room for this specific symbol
     this.server.to(`price:${price.symbol}`).emit('price:update', price);
+
+    // Re-emit to requested-symbol rooms that were resolved to this configured symbol,
+    // rewriting the label so clients receive the pair they asked for.
+    const requestedLabels = this.configuredToRequested.get(price.symbol);
+    if (requestedLabels) {
+      for (const requested of requestedLabels) {
+        this.server
+          .to(`price:${requested}`)
+          .emit('price:update', { ...price, symbol: requested });
+      }
+    }
 
     // Also broadcast to general channel for dashboard updates
     this.server.emit('price:tick', {

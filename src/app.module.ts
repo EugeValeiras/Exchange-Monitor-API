@@ -21,6 +21,8 @@ import { PnlModule } from './modules/pnl/pnl.module';
 import { HealthModule } from './modules/health/health.module';
 import { JobsModule } from './jobs/jobs.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { MarketAnalysisModule } from './modules/market-analysis/market-analysis.module';
+import { AgentModule } from './modules/agent/agent.module';
 
 @Module({
   imports: [
@@ -58,6 +60,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     PnlModule,
     HealthModule,
     NotificationsModule,
+    MarketAnalysisModule,
+    AgentModule,
 
     // Jobs
     JobsModule,

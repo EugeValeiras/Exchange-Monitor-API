@@ -31,6 +31,15 @@ export class CostBasisLot {
 
   @Prop({ required: true })
   source: string; // 'buy', 'deposit', 'interest', 'transfer_in'
+
+  @Prop()
+  pair?: string; // e.g. 'MONAD/NEXO'
+
+  @Prop()
+  priceAsset?: string; // The asset used to price the trade (e.g. 'NEXO')
+
+  @Prop({ type: Number })
+  originalPrice?: number; // Price in priceAsset units before USD conversion
 }
 
 export const CostBasisLotSchema = SchemaFactory.createForClass(CostBasisLot);

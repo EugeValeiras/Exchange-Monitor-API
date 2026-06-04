@@ -4,6 +4,7 @@ import {
   IBalance,
   ITransaction,
   IPrice,
+  IOHLCVCandle,
 } from '../../../common/interfaces/exchange-adapter.interface';
 
 export class BinanceAdapter extends BaseExchangeAdapter {
@@ -197,6 +198,31 @@ export class BinanceAdapter extends BaseExchangeAdapter {
       }));
     } catch (error) {
       this.handleError(error as Error, 'fetchPrices');
+    }
+  }
+
+  async fetchOHLCV(
+    symbol: string,
+    timeframe: string,
+    limit?: number,
+  ): Promise<IOHLCVCandle[]> {
+    try {
+      const candles = await this.client.fetchOHLCV(
+        symbol,
+        timeframe,
+        undefined,
+        limit,
+      );
+      return candles.map(([timestamp, open, high, low, close, volume]) => ({
+        timestamp: timestamp as number,
+        open: open as number,
+        high: high as number,
+        low: low as number,
+        close: close as number,
+        volume: volume as number,
+      }));
+    } catch (error) {
+      this.handleError(error as Error, 'fetchOHLCV');
     }
   }
 }
