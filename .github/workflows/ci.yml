@@ -1,0 +1,28 @@
+# CI — Exchange-Monitor-API (NestJS, Node 24) en runner self-hosted (la Pi).
+# main lo cubre deploy.yml (build+test+smoke+deploy); ci.yml queda para ramas
+# y PRs. flock compartido con CCE para no chocar builds en la Pi de 4GB.
+name: CI
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & test
+    runs-on: [self-hosted, exchange-pi]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node de nvm al PATH
+        run: echo "$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | sort -V | tail -1)/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: flock /tmp/cce-ci.lock npm ci --prefer-offline --no-audit
+
+      - name: Build
+        run: flock /tmp/cce-ci.lock npm run build
+
+      - name: Tests
+        run: flock /tmp/cce-ci.lock npx jest --ci

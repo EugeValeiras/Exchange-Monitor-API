@@ -1,0 +1,62 @@
+# Deploy continuo de Exchange-Monitor-API, espejo del esquema de CCE-API:
+# cada push a main se construye, testea, pasa el smoke de boot y recién ahí
+# reinicia el servicio (con healthcheck y rollback automático en el helper).
+#
+# Corre en el runner self-hosted de la Pi y trabaja SOBRE EL CHECKOUT DE
+# PRODUCCIÓN (/home/evaleiras/workspace/exchange-monitor/exchange-monitor-api):
+# ahí viven .env y node_modules calientes. El guard de árbol sucio evita pisar
+# trabajo local a medio hacer.
+name: Deploy Exchange-Monitor-API
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, exchange-pi]
+    defaults:
+      run:
+        working-directory: /home/evaleiras/workspace/exchange-monitor/exchange-monitor-api
+    steps:
+      # El runner corre bajo systemd con PATH mínimo: el camino documentado es
+      # GITHUB_PATH. Se toma la versión más nueva de nvm para no hardcodearla.
+      - name: Node de nvm al PATH
+        run: echo "$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | sort -V | tail -1)/bin" >> "$GITHUB_PATH"
+
+      - name: Guard de árbol limpio
+        run: |
+          git diff --quiet && git diff --cached --quiet || {
+            echo "::error::El checkout de prod tiene cambios sin commitear: no piso trabajo local"; exit 1; }
+
+      - name: Traer main
+        run: git fetch origin main && git checkout main && git merge --ff-only origin/main
+
+      # flock compartido con los runners de CCE: la Pi de 4GB no banca dos
+      # builds simultáneos (OOM exit 137 en CCE, 30/07).
+      - name: Dependencias
+        run: flock /tmp/cce-ci.lock npm ci --prefer-offline --no-audit
+
+      - name: Build
+        run: flock /tmp/cce-ci.lock npm run build
+
+      - name: Tests
+        run: flock /tmp/cce-ci.lock npx jest --ci
+
+      - name: Smoke de boot (DI + config + Mongo, sin listen ni jobs)
+        run: flock /tmp/cce-ci.lock env EM_BOOT_SMOKE=1 node dist/main.js
+
+      - name: Deploy (restart con healthcheck y rollback)
+        run: sudo -n /usr/local/bin/exchange-monitor-api-restart
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3050/api/status >/dev/null && { echo "API sana"; exit 0; }
+            sleep 2
+          done
+          echo "::error::La API no respondió el health tras el deploy"; exit 1

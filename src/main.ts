@@ -51,6 +51,14 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
+  // Smoke de boot para el deploy (espejo de CCE_BOOT_SMOKE): valida DI,
+  // config y conexión a Mongo sin listen ni jobs, y sale.
+  if (process.env.EM_BOOT_SMOKE === '1') {
+    console.log('EM_BOOT_SMOKE: boot OK');
+    await app.close();
+    process.exit(0);
+  }
+
   const port = process.env.PORT || 3000;
   await app.listen(port);
 
