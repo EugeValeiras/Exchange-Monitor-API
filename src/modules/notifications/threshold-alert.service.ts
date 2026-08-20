@@ -150,11 +150,13 @@ export class ThresholdAlertService implements OnModuleInit {
     const title = `${emoji} ${asset} ${arrow} ${config.formatPrice(currentPrice)}`;
     const body = `${asset} ${sign}${changePercent}% (${config.formatPrice(lastPrice)} → ${config.formatPrice(currentPrice)})`;
 
-    // Get all users with push tokens
-    const allTokens = await this.notificationsService.getAllUserTokens();
+    // Only notify users who have price-change notifications enabled
+    const allTokens = await this.notificationsService.getEnabledUserTokens();
 
     if (allTokens.length === 0) {
-      this.logger.debug('No push tokens registered, skipping alert');
+      this.logger.debug(
+        'No tokens with notifications enabled, skipping alert',
+      );
       return;
     }
 

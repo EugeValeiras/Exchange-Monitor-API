@@ -83,6 +83,12 @@ Reglas (CRÍTICAS — el bloque es lo que efectivamente dibuja):
   3. Emití el bloque con horizontal-line por cada nivel.
   4. Describí en texto natural qué marcaste y por qué.
 
+CAPACIDADES AVANZADAS (usalas cuando aporten — NO por defecto):
+- **Subagentes** (tool \`Agent\`): para búsquedas/lecturas amplias o trabajo paralelo independiente, lanzá un subagente (ej. \`Explore\`) y quedate con la conclusión, no con el dump. Útil para "revisá todo X" o investigaciones que tocan muchos comandos.
+- **Workflows** (tool \`Workflow\`): orquestación multi-agente determinística (fan-out, pipelines, verificación adversarial). Reservalo para trabajo pesado y bien definido — ej. analizar en paralelo varios pares/timeframes, o auditar el portfolio asset por asset. Es CARO en tokens: usalo solo si el usuario pide algo exhaustivo o que claramente se beneficie del paralelismo, y avisá brevemente antes de lanzarlo.
+- **Tareas en background** (tools \`TaskCreate\` / \`Monitor\` / \`TaskOutput\`): para análisis largos que no quieras bloquear el chat, lanzalos en background y reportá cuando terminen.
+- **Plan mode**: si estás en modo plan, NO ejecutes acciones que muten estado — investigá read-only y presentá un plan claro con \`ExitPlanMode\` para que Eugenio lo apruebe antes de actuar.
+
 REGLAS DE FORMATO (obligatorias — la respuesta se renderiza en un chat mobile):
 - Usá **pipe tables markdown** siempre. Ejemplo:
   | Asset | % | Valor |
@@ -149,7 +155,38 @@ const ALLOWED_TOOLS = [
   'Glob',
   'Grep',
   'Skill',
+  // Orquestación / agentes avanzados (features nuevas de Claude Code)
+  'Workflow', // orquestación multi-agente determinística (fan-out, pipelines)
+  'Agent', // lanzar subagentes (Explore, general-purpose, etc.) para trabajo paralelo
+  'TaskCreate', // tareas en background
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TaskUpdate',
+  'Monitor', // esperar a que una tarea/condición en background se cumpla
+  'ExitPlanMode', // presentar el plan en plan mode
 ];
+
+export interface WorkflowPhaseEntry {
+  index: number;
+  title: string;
+}
+
+export interface WorkflowAgentEntry {
+  index: number;
+  label: string;
+  phaseIndex: number;
+  phaseTitle: string;
+  state: string; // 'start' | 'progress' | 'done' | 'error'
+  model?: string;
+  tokens?: number;
+  toolCalls?: number;
+  promptPreview?: string;
+  resultPreview?: string;
+  durationMs?: number;
+  attempt?: number;
+}
 
 export type AgentEvent =
   | { type: 'session'; sessionId: string }
@@ -157,6 +194,18 @@ export type AgentEvent =
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; toolUseId: string; content: string; isError?: boolean }
   | { type: 'usage'; inputTokens: number; outputTokens: number; cachedTokens: number; costUsd?: number }
+  // Live workflow orchestration progress (Workflow tool). toolUseId matches the
+  // 'Workflow' tool_use so the frontend can attach the tree to that tool card.
+  | { type: 'workflow_started'; toolUseId: string; taskId: string; workflowName?: string; description?: string }
+  | {
+      type: 'workflow_progress';
+      toolUseId: string;
+      taskId: string;
+      activity?: string;
+      phases: WorkflowPhaseEntry[];
+      agents: WorkflowAgentEntry[];
+    }
+  | { type: 'workflow_done'; toolUseId: string; taskId: string; status: string; summary?: string }
   | { type: 'done'; result?: string; sessionId?: string }
   | { type: 'error'; message: string };
 
@@ -166,6 +215,8 @@ interface RunOptions {
   model?: AgentModel;
   jwt: string;
   signal?: AbortSignal;
+  /** Claude Code permission mode. Default 'acceptEdits'; 'plan' = read-only planning turn. */
+  permissionMode?: 'acceptEdits' | 'plan';
 }
 
 @Injectable()
@@ -192,7 +243,7 @@ export class AgentService {
       '--include-partial-messages',
       '--append-system-prompt', SYSTEM_PROMPT_APPEND,
       '--allowed-tools', ALLOWED_TOOLS.join(' '),
-      '--permission-mode', 'acceptEdits',
+      '--permission-mode', opts.permissionMode ?? 'acceptEdits',
       ...(extraDirs.length ? ['--add-dir', ...extraDirs] : []),
     ];
 
@@ -207,7 +258,7 @@ export class AgentService {
     args.push(opts.message);
 
     this.logger.log(
-      `Spawning claude (model=${opts.model ?? 'default'}, resume=${opts.sessionId ?? 'new'})`,
+      `Spawning claude (model=${opts.model ?? 'default'}, resume=${opts.sessionId ?? 'new'}, mode=${opts.permissionMode ?? 'acceptEdits'})`,
     );
 
     // Ensure the nvm node bin (where exchange-monitor is npm-linked) is at
@@ -241,6 +292,17 @@ export class AgentService {
       yield { type: 'error', message: `Failed to spawn claude: ${(err as Error).message}` };
       return;
     }
+
+    // spawn() reports failures like ENOENT (claude binary not on PATH)
+    // asynchronously via an 'error' event, NOT as a synchronous throw — so the
+    // try/catch above never sees them. Without this handler the unhandled
+    // 'error' event crashes the whole API process. Capture it and surface it as
+    // a normal agent error instead.
+    let spawnError: Error | undefined;
+    proc.on('error', (err: Error) => {
+      spawnError = err;
+      this.logger.error(`claude subprocess error: ${err.message}`);
+    });
 
     const onAbort = () => {
       this.logger.warn('Client aborted, killing claude subprocess');
@@ -288,6 +350,13 @@ export class AgentService {
       opts.signal?.removeEventListener('abort', onAbort);
     }
 
+    // On spawn failure the process never starts, so the 'close' await below may
+    // never resolve — bail out here with the captured error first.
+    if (spawnError) {
+      yield { type: 'error', message: `Failed to spawn claude: ${spawnError.message}` };
+      return;
+    }
+
     const exitCode: number = await new Promise((resolve) => {
       if (proc.exitCode !== null) resolve(proc.exitCode);
       else proc.on('close', resolve);
@@ -327,6 +396,69 @@ export class AgentService {
         setSessionId(event.session_id);
         out.push({ type: 'session', sessionId: event.session_id });
       }
+      return out;
+    }
+
+    // ---- Workflow orchestration progress (Workflow tool) ----
+    // Background tasks emit the same task_* envelope; we only surface the ones
+    // that are dynamic workflows (have a workflow_progress tree / workflow_name).
+    if (event.type === 'system' && event.subtype === 'task_started') {
+      if (event.task_type === 'local_workflow' || event.workflow_name) {
+        out.push({
+          type: 'workflow_started',
+          toolUseId: event.tool_use_id,
+          taskId: event.task_id,
+          workflowName: event.workflow_name,
+          description: event.description,
+        });
+      }
+      return out;
+    }
+
+    if (event.type === 'system' && event.subtype === 'task_progress') {
+      if (Array.isArray(event.workflow_progress)) {
+        const phases: WorkflowPhaseEntry[] = [];
+        const agents: WorkflowAgentEntry[] = [];
+        for (const entry of event.workflow_progress) {
+          if (entry?.type === 'workflow_phase') {
+            phases.push({ index: entry.index, title: entry.title });
+          } else if (entry?.type === 'workflow_agent') {
+            agents.push({
+              index: entry.index,
+              label: entry.label,
+              phaseIndex: entry.phaseIndex,
+              phaseTitle: entry.phaseTitle,
+              state: entry.state,
+              model: entry.model,
+              tokens: entry.tokens,
+              toolCalls: entry.toolCalls,
+              promptPreview: entry.promptPreview,
+              resultPreview: entry.resultPreview,
+              durationMs: entry.durationMs,
+              attempt: entry.attempt,
+            });
+          }
+        }
+        out.push({
+          type: 'workflow_progress',
+          toolUseId: event.tool_use_id,
+          taskId: event.task_id,
+          activity: event.description,
+          phases,
+          agents,
+        });
+      }
+      return out;
+    }
+
+    if (event.type === 'system' && event.subtype === 'task_notification') {
+      out.push({
+        type: 'workflow_done',
+        toolUseId: event.tool_use_id,
+        taskId: event.task_id,
+        status: event.status ?? 'completed',
+        summary: event.summary,
+      });
       return out;
     }
 
