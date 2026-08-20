@@ -23,8 +23,14 @@ interface CacheEntry<T> {
 
 const CANDLE_CACHE_TTL_MS = 60_000;
 const SUMMARY_CACHE_TTL_MS = 60_000;
-const MAX_OHLC_LIMIT = 500;
-const SUMMARY_LIMIT = 750; // 750 hourly candles ≈ 31 days
+// The summary asks for 745 hourly candles to reach back 30 days. This cap
+// used to be 500, which silently truncated the request: `closeAt(24 * 30)`
+// then indexed at -221 and `pctChange30d` came back null for every pair, on
+// every exchange, always. Binance serves well past this; Kraken tops out at
+// 720 per request, so on Kraken the 30d column stays null by the exchange's
+// own limit rather than by ours.
+const MAX_OHLC_LIMIT = 1000;
+const SUMMARY_LIMIT = 745; // 745 hourly candles ≈ 31 days
 
 @Injectable()
 export class MarketAnalysisService {
