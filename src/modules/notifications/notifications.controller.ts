@@ -25,6 +25,10 @@ import {
   NotificationSettingsDto,
   NotificationSettingsResponseDto,
 } from './dto/notification-settings.dto';
+import {
+  SendNotificationDto,
+  SendNotificationResponseDto,
+} from './dto/send-notification.dto';
 
 @ApiTags('notifications')
 @ApiBearerAuth()
@@ -100,6 +104,22 @@ export class NotificationsController {
         ? 'Notification sent successfully'
         : 'Failed to send notification',
     };
+  }
+
+  // Send a notification with fully configurable content to the user's devices.
+  // Intended for bots / ad-hoc market alerts.
+  @Post('send')
+  @HttpCode(HttpStatus.OK)
+  async sendNotification(
+    @CurrentUser('userId') userId: string,
+    @Body() dto: SendNotificationDto,
+  ): Promise<SendNotificationResponseDto> {
+    return this.notificationsService.sendToUser(
+      userId,
+      dto.title,
+      dto.body,
+      dto.data,
+    );
   }
 
   // Endpoint to send silent push for widget refresh

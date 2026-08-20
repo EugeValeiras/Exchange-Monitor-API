@@ -10,6 +10,8 @@ export class ChatToolRecord {
   @Prop({ type: MongooseSchema.Types.Mixed }) input?: unknown;
   @Prop() result?: string;
   @Prop({ default: false }) isError?: boolean;
+  /** Final workflow orchestration snapshot (only for the Workflow tool). */
+  @Prop({ type: MongooseSchema.Types.Mixed }) workflow?: unknown;
 }
 
 const ChatToolRecordSchema = SchemaFactory.createForClass(ChatToolRecord);

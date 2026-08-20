@@ -24,5 +24,6 @@ export default () => ({
     syncTransactions: process.env.CRON_SYNC_TRANSACTIONS !== 'false',
     widgetRefresh: process.env.CRON_WIDGET_REFRESH !== 'false',
     priceHistory: process.env.CRON_PRICE_HISTORY !== 'false',
+    paperTrading: process.env.CRON_PAPER_TRADING !== 'false',
   },
 });

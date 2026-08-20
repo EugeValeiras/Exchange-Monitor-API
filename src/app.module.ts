@@ -23,6 +23,7 @@ import { JobsModule } from './jobs/jobs.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { MarketAnalysisModule } from './modules/market-analysis/market-analysis.module';
 import { AgentModule } from './modules/agent/agent.module';
+import { PaperTradingModule } from './modules/paper-trading/paper-trading.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { AgentModule } from './modules/agent/agent.module';
     NotificationsModule,
     MarketAnalysisModule,
     AgentModule,
+    PaperTradingModule,
 
     // Jobs
     JobsModule,

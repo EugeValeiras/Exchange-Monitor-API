@@ -171,6 +171,14 @@ export class UsersService {
     });
   }
 
+  async findUsersWithNotificationsEnabled(): Promise<UserDocument[]> {
+    return this.userModel.find({
+      isActive: true,
+      'notificationSettings.enabled': true,
+      pushTokens: { $exists: true, $ne: [] },
+    });
+  }
+
   // Passkey challenge methods
   async setPasskeyChallenge(
     userId: string | Types.ObjectId,

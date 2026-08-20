@@ -60,6 +60,7 @@ export class AgentController {
         model: dto.model,
         jwt,
         signal: controller.signal,
+        permissionMode: dto.planMode ? 'plan' : undefined,
       })) {
         events.push(event);
         collector.handle(event);
@@ -133,6 +134,7 @@ export class AgentController {
         model: dto.model,
         jwt,
         signal: controller.signal,
+        permissionMode: dto.planMode ? 'plan' : undefined,
       })) {
         if (controller.signal.aborted) break;
         collector.handle(event);
@@ -233,6 +235,28 @@ export class AgentController {
   }
 }
 
+interface WorkflowSnapshot {
+  name?: string;
+  description?: string;
+  status: 'running' | 'completed' | 'error';
+  activity?: string;
+  phases: { index: number; title: string }[];
+  agents: Array<{
+    index: number;
+    label: string;
+    phaseIndex: number;
+    phaseTitle: string;
+    state: string;
+    model?: string;
+    tokens?: number;
+    toolCalls?: number;
+    promptPreview?: string;
+    resultPreview?: string;
+    durationMs?: number;
+    attempt?: number;
+  }>;
+}
+
 /**
  * Accumulates an assistant turn from the agent event stream into a single
  * persistable record.
@@ -267,6 +291,48 @@ class TurnCollector {
         if (tool) {
           tool.result = event.content;
           tool.isError = event.isError;
+        }
+        break;
+      }
+      case 'workflow_started': {
+        const tool = this.tools.find((t) => t.id === event.toolUseId);
+        if (tool) {
+          tool.workflow = {
+            name: event.workflowName,
+            description: event.description,
+            status: 'running',
+            phases: [],
+            agents: [],
+          };
+        }
+        break;
+      }
+      case 'workflow_progress': {
+        const tool = this.tools.find((t) => t.id === event.toolUseId);
+        if (tool) {
+          const wf = (tool.workflow ?? {
+            status: 'running',
+            phases: [],
+            agents: [],
+          }) as WorkflowSnapshot;
+          if (event.activity) wf.activity = event.activity;
+          for (const p of event.phases) {
+            if (!wf.phases.some((x) => x.index === p.index)) wf.phases.push(p);
+          }
+          for (const a of event.agents) {
+            const existing = wf.agents.find((x) => x.index === a.index);
+            if (existing) Object.assign(existing, a);
+            else wf.agents.push({ ...a });
+          }
+          tool.workflow = wf;
+        }
+        break;
+      }
+      case 'workflow_done': {
+        const tool = this.tools.find((t) => t.id === event.toolUseId);
+        if (tool?.workflow) {
+          (tool.workflow as WorkflowSnapshot).status =
+            event.status === 'completed' ? 'completed' : 'error';
         }
         break;
       }

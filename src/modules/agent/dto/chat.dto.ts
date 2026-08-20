@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export enum AgentModel {
   SONNET = 'sonnet',
@@ -31,4 +31,13 @@ export class ChatDto {
   @IsOptional()
   @IsEnum(AgentModel)
   model?: AgentModel;
+
+  @ApiPropertyOptional({
+    description:
+      'Plan mode: the agent researches read-only and presents a plan before acting (no state mutations this turn).',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  planMode?: boolean;
 }
