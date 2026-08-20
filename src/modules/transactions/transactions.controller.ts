@@ -9,6 +9,7 @@ import {
 import { TransactionsService } from './transactions.service';
 import { ExchangeCredentialsService } from '../exchange-credentials/exchange-credentials.service';
 import { TransactionFilterDto } from './dto/transaction-filter.dto';
+import { PairTradesDto, PairTradesQueryDto } from './dto/pair-trades.dto';
 import {
   PaginatedTransactionsDto,
   TransactionStatsDto,
@@ -108,6 +109,27 @@ export class TransactionsController {
     const filename = `transacciones_${new Date().toISOString().split('T')[0]}.xlsx`;
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(buffer);
+  }
+
+  @Get('by-pair')
+  @ApiOperation({
+    summary: 'Trades of a single pair plus the resulting position',
+    description:
+      'Feeds the "my trades" layer of the candlestick chart. USD-family quotes are ' +
+      'folded together, so BTC/USDT also returns the BTC/USD trades. The position is ' +
+      'computed over the whole history; from/to only narrow the returned trades.',
+  })
+  @ApiResponse({ status: 200, type: PairTradesDto })
+  async getByPair(
+    @CurrentUser('userId') userId: string,
+    @Query() query: PairTradesQueryDto,
+  ): Promise<PairTradesDto> {
+    return this.transactionsService.getTradesByPair(
+      userId,
+      query.pair,
+      query.from,
+      query.to,
+    );
   }
 
   @Get(':id')

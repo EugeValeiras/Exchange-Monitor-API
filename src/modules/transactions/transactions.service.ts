@@ -16,6 +16,8 @@ import {
   TransactionStatsDto,
 } from './dto/transaction-response.dto';
 import { ITransaction } from '../../common/interfaces/exchange-adapter.interface';
+import { equivalentPairs, splitPair } from '../../common/utils/pair.util';
+import { PairTradesDto } from './dto/pair-trades.dto';
 
 @Injectable()
 export class TransactionsService {
@@ -32,10 +34,13 @@ export class TransactionsService {
     private readonly settingsService: SettingsService,
   ) {}
 
-  async findAll(
+  /**
+   * Shared filter translation for findAll and exportToExcel.
+   */
+  private buildQuery(
     userId: string,
     filter: TransactionFilterDto,
-  ): Promise<PaginatedTransactionsDto> {
+  ): FilterQuery<Transaction> {
     const query: FilterQuery<Transaction> = {
       userId: new Types.ObjectId(userId),
     };
@@ -44,7 +49,7 @@ export class TransactionsService {
       query.exchange = filter.exchange;
     }
     if (filter.types) {
-      const typesArray = filter.types.split(',').filter(t => t.trim());
+      const typesArray = filter.types.split(',').filter((t) => t.trim());
       if (typesArray.length > 0) {
         query.type = { $in: typesArray };
       }
@@ -52,7 +57,7 @@ export class TransactionsService {
       query.type = filter.type;
     }
     if (filter.assets) {
-      const assetsArray = filter.assets.split(',').filter(a => a.trim());
+      const assetsArray = filter.assets.split(',').filter((a) => a.trim());
       if (assetsArray.length > 0) {
         // Match either the primary asset OR the price asset (for trades)
         query.$or = [
@@ -62,10 +67,11 @@ export class TransactionsService {
       }
     } else if (filter.asset) {
       // Match either the primary asset OR the price asset (for trades)
-      query.$or = [
-        { asset: filter.asset },
-        { priceAsset: filter.asset },
-      ];
+      query.$or = [{ asset: filter.asset }, { priceAsset: filter.asset }];
+    }
+    if (filter.pair) {
+      // USD-family quotes are interchangeable: BTC/USDT also matches BTC/USD
+      query.pair = { $in: equivalentPairs(filter.pair) };
     }
     if (filter.startDate || filter.endDate) {
       query.timestamp = {};
@@ -76,6 +82,15 @@ export class TransactionsService {
         query.timestamp.$lte = new Date(filter.endDate);
       }
     }
+
+    return query;
+  }
+
+  async findAll(
+    userId: string,
+    filter: TransactionFilterDto,
+  ): Promise<PaginatedTransactionsDto> {
+    const query = this.buildQuery(userId, filter);
 
     const skip = (filter.page - 1) * filter.limit;
     const [transactions, total] = await Promise.all([
@@ -107,6 +122,115 @@ export class TransactionsService {
       page: filter.page,
       limit: filter.limit,
       totalPages: Math.ceil(total / filter.limit),
+    };
+  }
+
+  /**
+   * Trades of a single pair plus the resulting position, for the "my trades"
+   * layer on the candlestick chart.
+   *
+   * The position is a WEIGHTED MOVING AVERAGE over the whole history of the
+   * pair: every buy moves the average cost, every sell realizes P&L against
+   * the average at that moment and leaves it untouched. Note this differs on
+   * purpose from the PnL module, which keeps FIFO cost-basis lots per asset.
+   *
+   * Unrealized P&L is deliberately NOT returned: the chart computes it from
+   * the last candle it is already drawing, so the number always matches what
+   * the user sees.
+   */
+  async getTradesByPair(
+    userId: string,
+    pair: string,
+    from?: number,
+    to?: number,
+  ): Promise<PairTradesDto> {
+    const matchedPairs = equivalentPairs(pair);
+    const base = splitPair(pair)?.base;
+
+    const trades = await this.transactionModel
+      .find({
+        userId: new Types.ObjectId(userId),
+        type: TransactionType.TRADE,
+        pair: { $in: matchedPairs },
+      })
+      .sort({ timestamp: 1 })
+      .exec();
+
+    let netAmount = 0;
+    let costBasis = 0;
+    let realizedPnl = 0;
+    let totalBought = 0;
+    let totalSold = 0;
+
+    for (const tx of trades) {
+      const price = tx.price ?? 0;
+      const amount = Math.abs(tx.amount ?? 0);
+      if (!price || !amount) {
+        continue;
+      }
+
+      // A fee charged in the quote asset adds to the cost; one charged in the
+      // base asset reduces what actually landed in the account. Fees in a
+      // third asset (BNB and friends) are left out of the cost basis.
+      const fee = Math.abs(tx.fee ?? 0);
+      const feeAsset = tx.feeAsset?.toUpperCase();
+      const feeInBase = feeAsset && feeAsset === base ? fee : 0;
+      const feeInQuote = feeAsset && feeAsset !== base ? fee : 0;
+
+      if (tx.side === 'sell') {
+        const avgCost = netAmount > 0 ? costBasis / netAmount : 0;
+        const sold = Math.min(amount, netAmount > 0 ? netAmount : amount);
+        realizedPnl += amount * price - feeInQuote - avgCost * sold;
+        costBasis -= avgCost * sold;
+        netAmount -= amount;
+        totalSold += amount;
+      } else {
+        const received = amount - feeInBase;
+        netAmount += received;
+        costBasis += amount * price + feeInQuote;
+        totalBought += received;
+      }
+
+      // Guard against drift when the history is incomplete (a sale whose buy
+      // was never imported would otherwise leave a negative cost behind).
+      if (netAmount <= 1e-12) {
+        netAmount = 0;
+        costBasis = 0;
+      }
+    }
+
+    const inRange = trades.filter((tx) => {
+      const ts = tx.timestamp.getTime();
+      if (from !== undefined && ts < from) return false;
+      if (to !== undefined && ts > to) return false;
+      return true;
+    });
+
+    return {
+      pair: pair.toUpperCase(),
+      matchedPairs,
+      trades: inRange.map((tx) => ({
+        id: tx._id.toString(),
+        exchange: tx.exchange,
+        pair: tx.pair,
+        side: tx.side ?? 'buy',
+        amount: Math.abs(tx.amount ?? 0),
+        price: tx.price ?? 0,
+        total: tx.total ?? Math.abs(tx.amount ?? 0) * (tx.price ?? 0),
+        fee: tx.fee,
+        feeAsset: tx.feeAsset,
+        timestamp: tx.timestamp,
+      })),
+      position: {
+        netAmount,
+        avgEntryPrice: netAmount > 0 ? costBasis / netAmount : 0,
+        costBasis,
+        realizedPnl,
+        totalBought,
+        totalSold,
+        tradeCount: trades.length,
+      },
+      outsideRange: trades.length - inRange.length,
     };
   }
 
@@ -455,42 +579,8 @@ export class TransactionsService {
     userId: string,
     filter: TransactionFilterDto,
   ): Promise<Buffer> {
-    // Build query (same as findAll but without pagination)
-    const query: FilterQuery<Transaction> = {
-      userId: new Types.ObjectId(userId),
-    };
-
-    if (filter.exchange) {
-      query.exchange = filter.exchange;
-    }
-    if (filter.types) {
-      const typesArray = filter.types.split(',').filter((t) => t.trim());
-      if (typesArray.length > 0) {
-        query.type = { $in: typesArray };
-      }
-    } else if (filter.type) {
-      query.type = filter.type;
-    }
-    if (filter.assets) {
-      const assetsArray = filter.assets.split(',').filter((a) => a.trim());
-      if (assetsArray.length > 0) {
-        query.$or = [
-          { asset: { $in: assetsArray } },
-          { priceAsset: { $in: assetsArray } },
-        ];
-      }
-    } else if (filter.asset) {
-      query.$or = [{ asset: filter.asset }, { priceAsset: filter.asset }];
-    }
-    if (filter.startDate || filter.endDate) {
-      query.timestamp = {};
-      if (filter.startDate) {
-        query.timestamp.$gte = new Date(filter.startDate);
-      }
-      if (filter.endDate) {
-        query.timestamp.$lte = new Date(filter.endDate);
-      }
-    }
+    // Same filters as findAll, without pagination
+    const query = this.buildQuery(userId, filter);
 
     const transactions = await this.transactionModel
       .find(query)
