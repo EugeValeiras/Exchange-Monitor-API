@@ -44,6 +44,16 @@ export class TransactionFilterDto {
   @IsString()
   assets?: string;
 
+  @ApiProperty({
+    required: false,
+    example: 'BTC/USDT',
+    description:
+      'Trading pair. USD-family quotes are interchangeable: BTC/USDT also matches BTC/USD',
+  })
+  @IsOptional()
+  @IsString()
+  pair?: string;
+
   @ApiProperty({ required: false, example: '2024-01-01' })
   @IsOptional()
   @IsDateString()

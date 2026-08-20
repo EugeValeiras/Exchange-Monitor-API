@@ -61,4 +61,5 @@ TransactionSchema.index({ userId: 1, timestamp: -1 });
 TransactionSchema.index({ userId: 1, exchange: 1, timestamp: -1 });
 TransactionSchema.index({ userId: 1, type: 1, timestamp: -1 });
 TransactionSchema.index({ userId: 1, asset: 1 });
+TransactionSchema.index({ userId: 1, pair: 1, timestamp: -1 });
 TransactionSchema.index({ externalId: 1, exchange: 1 }, { unique: true });
