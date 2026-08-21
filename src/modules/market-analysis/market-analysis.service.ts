@@ -58,8 +58,9 @@ export class MarketAnalysisService {
     exchange: SupportedExchange,
     symbol: string,
     timeframe: string,
+    limit?: number,
   ): Promise<IndicatorsResponseDto> {
-    const candles = await this.fetchOHLCVCached(exchange, symbol, timeframe, 200);
+    const candles = await this.fetchOHLCVCached(exchange, symbol, timeframe, limit ?? 200);
     const closes = candles.map((c) => c.close);
     const timestamps = candles.map((c) => c.timestamp);
 
