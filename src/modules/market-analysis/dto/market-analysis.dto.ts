@@ -46,6 +46,16 @@ export class IndicatorsQueryDto {
   @ApiProperty({ enum: OhlcTimeframe, example: OhlcTimeframe.H1 })
   @IsEnum(OhlcTimeframe)
   timeframe: OhlcTimeframe;
+
+  @ApiPropertyOptional({
+    example: 500,
+    description:
+      'Number of candles (default 200, max 1000). The chart asks for more than it draws so ' +
+      'there is history to pan into.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  limit?: number;
 }
 
 export class SummaryQueryDto {

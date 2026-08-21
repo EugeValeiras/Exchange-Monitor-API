@@ -46,6 +46,7 @@ export class MarketAnalysisController {
       query.exchange,
       query.symbol,
       query.timeframe,
+      query.limit,
     );
   }
 
