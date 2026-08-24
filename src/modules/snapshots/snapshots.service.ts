@@ -1,4 +1,11 @@
-import { Injectable, Logger, NotFoundException, Inject, forwardRef } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import {
@@ -799,4 +806,83 @@ export class SnapshotsService {
       balanceState.set(tx.feeAsset, feeBalance - Math.abs(tx.fee));
     }
   }
+
+  /**
+   * Borra snapshots horarios del usuario en un rango de tiempo.
+   *
+   * Existe por un problema real y recurrente: cuando se mueven fondos entre
+   * exchanges, el activo sale de uno y todavía no está acreditado en el otro.
+   * El snapshot horario que cae en esa ventana registra un total que no
+   * corresponde a ninguna pérdida — el 24/08/2026 una transferencia de BTC de
+   * NEXO a Binance dejó dos puntos de ~61k contra ~106k reales — y el gráfico
+   * de balance muestra un desplome fantasma.
+   *
+   * Se borra en vez de corregir el valor a propósito: para esas horas no hay
+   * una lectura real, y fabricar una sería inventar un dato. Sin el punto, el
+   * gráfico interpola entre las horas vecinas.
+   */
+  async deleteHourlySnapshots(
+    userId: string,
+    fromIso: string,
+    toIso: string,
+    dryRun = false,
+  ): Promise<{
+    dryRun: boolean;
+    matched: number;
+    deleted: number;
+    snapshots: { id: string; timestamp: Date; totalValueUsd: number }[];
+  }> {
+    const from = new Date(fromIso);
+    const to = new Date(toIso);
+
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new BadRequestException('from y to tienen que ser fechas ISO válidas');
+    }
+    if (from >= to) {
+      throw new BadRequestException('from tiene que ser anterior a to');
+    }
+    // Los snapshots horarios tienen TTL de 7 días: un rango mayor no puede ser
+    // intencional y solo abre la puerta a un borrado masivo por accidente.
+    const SIETE_DIAS_MS = 7 * 24 * 60 * 60 * 1000;
+    if (to.getTime() - from.getTime() > SIETE_DIAS_MS) {
+      throw new BadRequestException(
+        'el rango no puede superar los 7 días (es el TTL de los snapshots horarios)',
+      );
+    }
+
+    const filtro = {
+      userId: new Types.ObjectId(userId),
+      timestamp: { $gte: from, $lte: to },
+    };
+
+    const encontrados = await this.hourlySnapshotModel
+      .find(filtro)
+      .sort({ timestamp: 1 })
+      .select({ timestamp: 1, totalValueUsd: 1 })
+      .lean()
+      .exec();
+
+    const snapshots = encontrados.map((d) => ({
+      id: String(d._id),
+      timestamp: d.timestamp,
+      totalValueUsd: d.totalValueUsd,
+    }));
+
+    if (dryRun) {
+      return { dryRun: true, matched: snapshots.length, deleted: 0, snapshots };
+    }
+
+    const res = await this.hourlySnapshotModel.deleteMany(filtro).exec();
+    this.logger.warn(
+      `Borrados ${res.deletedCount} snapshots horarios de ${userId} entre ${from.toISOString()} y ${to.toISOString()}`,
+    );
+
+    return {
+      dryRun: false,
+      matched: snapshots.length,
+      deleted: res.deletedCount ?? 0,
+      snapshots,
+    };
+  }
+
 }

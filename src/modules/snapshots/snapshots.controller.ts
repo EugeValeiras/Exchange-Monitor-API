@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -155,6 +164,36 @@ export class SnapshotsController {
       fromDate: body.fromDate,
       skipExisting: body.skipExisting,
     });
+  }
+
+  // Va antes de @Get(':date') solo por prolijidad de lectura; no hay conflicto
+  // de ruteo porque el verbo es distinto.
+  @Delete('hourly')
+  @ApiOperation({
+    summary: 'Borrar snapshots horarios en un rango',
+    description:
+      'Sirve para sacar los puntos fantasma que quedan cuando se transfieren fondos entre ' +
+      'exchanges: el activo ya salió de uno y todavía no está acreditado en el otro, así que ' +
+      'el snapshot de esa hora registra un total que no corresponde a ninguna pérdida real. ' +
+      'Se borran en lugar de corregirse porque para esas horas no existe una lectura válida. ' +
+      'Usar dryRun=true para ver qué se borraría sin tocar nada. El rango no puede superar 7 días.',
+  })
+  @ApiQuery({ name: 'from', example: '2026-08-24T18:30:00Z' })
+  @ApiQuery({ name: 'to', example: '2026-08-24T20:30:00Z' })
+  @ApiQuery({ name: 'dryRun', required: false, example: 'true' })
+  @ApiResponse({ status: 200, description: 'Snapshots encontrados y borrados' })
+  async deleteHourly(
+    @CurrentUser('userId') userId: string,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('dryRun') dryRun?: string,
+  ) {
+    return this.snapshotsService.deleteHourlySnapshots(
+      userId,
+      from,
+      to,
+      dryRun === 'true',
+    );
   }
 
   @Get(':date')
