@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Schema as MongooseSchema, Types } from 'mongoose';
+import { AGENT_MODELS, AgentModel } from '../dto/chat.dto';
 
 export type ChatThreadDocument = ChatThread & Document;
 
@@ -40,8 +41,8 @@ export class ChatThread {
   @Prop({ default: null })
   claudeSessionId: string | null;
 
-  @Prop({ default: 'sonnet', enum: ['sonnet', 'opus', 'haiku'] })
-  model: 'sonnet' | 'opus' | 'haiku';
+  @Prop({ default: AgentModel.SONNET, enum: AGENT_MODELS })
+  model: AgentModel;
 
   @Prop({ type: [ChatMessageEntrySchema], default: [] })
   messages: ChatMessageEntry[];

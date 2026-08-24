@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { AgentModel } from './dto/chat.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ChatThreadsService, ThreadSummary } from './chat-threads.service';
 
@@ -38,7 +39,7 @@ export class ChatThreadsController {
   @Post()
   async create(
     @CurrentUser('userId') userId: string,
-    @Body() body: { title?: string; model?: 'sonnet' | 'opus' | 'haiku' },
+    @Body() body: { title?: string; model?: AgentModel },
   ): Promise<{ id: string }> {
     const doc = await this.threads.create({ userId, ...body });
     return { id: (doc._id as { toString(): string }).toString() };
