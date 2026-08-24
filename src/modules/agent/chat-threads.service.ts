@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { AgentModel } from './dto/chat.dto';
 import {
   ChatMessageEntry,
   ChatThread,
@@ -22,7 +23,7 @@ export interface ThreadSummary {
 export interface CreateThreadInput {
   userId: string;
   title?: string;
-  model?: 'sonnet' | 'opus' | 'haiku';
+  model?: AgentModel;
 }
 
 export interface AppendMessageInput {

@@ -5,7 +5,10 @@ export enum AgentModel {
   SONNET = 'sonnet',
   OPUS = 'opus',
   HAIKU = 'haiku',
+  FABLE = 'fable',
 }
+
+export const AGENT_MODELS: AgentModel[] = Object.values(AgentModel);
 
 export class ChatDto {
   @ApiProperty({ example: '¿Cómo viene mi portfolio?', description: 'User message' })

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { spawn, ChildProcessByStdio } from 'node:child_process';
 import * as readline from 'node:readline';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { AgentModel } from './dto/chat.dto';
 
@@ -200,7 +201,9 @@ export interface WorkflowAgentEntry {
 }
 
 export type AgentEvent =
-  | { type: 'session'; sessionId: string }
+  // `resolvedModel` es el modelo real que resolvió el alias (p. ej. 'sonnet'
+  // -> 'claude-sonnet-5'). Sirve para que la UI muestre qué contestó de verdad.
+  | { type: 'session'; sessionId: string; resolvedModel?: string }
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; toolUseId: string; content: string; isError?: boolean }
@@ -242,10 +245,20 @@ export class AgentService {
     // Allow the agent to read/write inside the whole Exchange-Monitor
     // workspace + /tmp (typical scratch dir for jq pipelines, intermediate
     // analysis files, etc.). Override via env AGENT_ALLOWED_DIRS (space-sep).
+    // El default NO puede ser una ruta absoluta de una máquina concreta: en la
+    // Pi ese path no existe. Caemos al cwd del proceso + /tmp, que existen en
+    // cualquier host. Filtramos los que no existan para no pasarle a claude un
+    // --add-dir inválido.
     const extraDirsRaw =
-      this.configService.get<string>('AGENT_ALLOWED_DIRS') ??
-      '/Users/eugeniovaleiras/workspace/Exchange-Monitor /tmp';
-    const extraDirs = extraDirsRaw.split(/\s+/).filter(Boolean);
+      this.configService.get<string>('AGENT_ALLOWED_DIRS') ?? `${process.cwd()} /tmp`;
+    const extraDirs = extraDirsRaw
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((dir) => {
+        if (fs.existsSync(dir)) return true;
+        this.logger.warn(`AGENT_ALLOWED_DIRS: ignoro '${dir}' porque no existe en este host`);
+        return false;
+      });
 
     const args: string[] = [
       '--print',
@@ -266,7 +279,13 @@ export class AgentService {
       args.push('--resume', opts.sessionId);
     }
 
-    args.push(opts.message);
+    // `--` cierra la lista de flags antes del prompt posicional. Es
+    // obligatorio: `--add-dir` es variádico, así que sin el separador se come
+    // el mensaje como si fuera un directorio más y claude muere con
+    // "Input must be provided either through stdin or as a prompt argument".
+    // Repetir `--add-dir` por directorio no alcanza: el último sigue siendo
+    // variádico. Ver docs/07-CLI-Y-AGENTE.md.
+    args.push('--', opts.message);
 
     this.logger.log(
       `Spawning claude (model=${opts.model ?? 'default'}, resume=${opts.sessionId ?? 'new'}, mode=${opts.permissionMode ?? 'acceptEdits'})`,
@@ -335,6 +354,8 @@ export class AgentService {
 
     let finalSessionId: string | undefined;
     let finalResult: string | undefined;
+    /** Ya emitimos un error con el motivo real (del evento result). */
+    let reportedError = false;
     const lastUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0 };
 
     try {
@@ -354,6 +375,7 @@ export class AgentService {
           finalResult = result;
         });
         for (const out of translated) {
+          if (out.type === 'error') reportedError = true;
           yield out;
         }
       }
@@ -374,10 +396,19 @@ export class AgentService {
     });
 
     if (exitCode !== 0) {
-      yield {
-        type: 'error',
-        message: `claude exited with code ${exitCode}: ${stderrChunks.join('').slice(0, 500)}`,
-      };
+      // Si el evento result ya explicó el fallo, no lo pisamos con un segundo
+      // error genérico.
+      if (!reportedError) {
+        const stderr = stderrChunks.join('').trim();
+        yield {
+          type: 'error',
+          message: stderr
+            ? `claude exited with code ${exitCode}: ${stderr.slice(0, 500)}`
+            : `claude exited with code ${exitCode} sin escribir nada en stderr ni emitir un evento result. ` +
+              `Suele ser un fallo de arranque del binario (versión, credenciales o flags no soportados) — ` +
+              `revisá el journal del servicio en el host.`,
+        };
+      }
       return;
     }
 
@@ -405,7 +436,11 @@ export class AgentService {
     if (event.type === 'system' && event.subtype === 'init') {
       if (event.session_id) {
         setSessionId(event.session_id);
-        out.push({ type: 'session', sessionId: event.session_id });
+        out.push({
+          type: 'session',
+          sessionId: event.session_id,
+          resolvedModel: typeof event.model === 'string' ? event.model : undefined,
+        });
       }
       return out;
     }
@@ -524,6 +559,22 @@ export class AgentService {
     if (event.type === 'result') {
       if (event.session_id) setSessionId(event.session_id);
       if (typeof event.result === 'string') setResult(event.result);
+      // Cuando el turno falla, claude NO escribe nada en stderr: el motivo
+      // viaja acá (subtype 'error_during_execution' / 'error_max_turns',
+      // is_error, api_error_status) y después sale con código 1. Si no lo
+      // emitimos, el usuario solo ve "claude exited with code 1: " sin
+      // ninguna pista de qué pasó.
+      if (event.is_error || (event.subtype && event.subtype !== 'success')) {
+        const reason =
+          [
+            event.subtype && event.subtype !== 'success' ? event.subtype : null,
+            event.api_error_status ? `api_error_status=${event.api_error_status}` : null,
+            typeof event.result === 'string' && event.result ? event.result : null,
+          ]
+            .filter(Boolean)
+            .join(' — ') || 'el turno terminó con error y claude no informó el motivo';
+        out.push({ type: 'error', message: `claude falló: ${reason}` });
+      }
       if (typeof event.total_cost_usd === 'number') usageRef.costUsd = event.total_cost_usd;
       if (event.usage) {
         usageRef.inputTokens = event.usage.input_tokens ?? usageRef.inputTokens;
