@@ -43,6 +43,18 @@ export class HourlySnapshot {
   @Prop({ required: true, type: Number })
   totalValueUsd: number;
 
+  /**
+   * El snapshot se tomó con una lectura incompleta: algún exchange no contestó
+   * y su saldo no está sumado. El valor guardado NO es la cartera real de esa
+   * hora, así que las series de gráficos lo excluyen.
+   */
+  @Prop({ type: Boolean, default: false, index: true })
+  isPartial?: boolean;
+
+  /** Exchanges que no contestaron cuando se tomó este snapshot. */
+  @Prop({ type: [String], default: undefined })
+  missingExchanges?: string[];
+
   @Prop({ type: [TopAssetSchema], default: [] })
   topAssets: TopAsset[];
 

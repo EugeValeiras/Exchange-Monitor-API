@@ -109,6 +109,7 @@ export class BalancesService {
         byAsset: freshData.byAsset,
         byExchange: freshData.byExchange,
         totalValueUsd: freshData.totalValueUsd,
+        failedExchanges: freshData.failedExchanges,
       });
 
       // Emit event for WebSocket
@@ -150,6 +151,7 @@ export class BalancesService {
         lastUpdated: cached.lastSyncAt,
         isCached: true,
         isSyncing: true,
+        failedExchanges: cached.data.failedExchanges ?? [],
       };
     }
 
@@ -161,6 +163,7 @@ export class BalancesService {
       byAsset: freshData.byAsset,
       byExchange: freshData.byExchange,
       totalValueUsd: freshData.totalValueUsd,
+      failedExchanges: freshData.failedExchanges,
     });
 
     return {
@@ -174,6 +177,10 @@ export class BalancesService {
    * Fetch fresh balances from all exchanges (internal method)
    */
   private async fetchBalancesFromExchanges(userId: string): Promise<ConsolidatedBalanceDto> {
+    // Exchanges que no contestaron en esta lectura. El consolidado sale igual
+    // con lo que sí se pudo traer, pero viaja acompañado de esta lista para que
+    // nadie lo persista creyendo que está completo.
+    const failedExchanges: string[] = [];
     const credentials = await this.credentialsService.findActiveByUser(userId);
     const exchangeBalances: ExchangeBalanceDto[] = [];
     const assetMap = new Map<string, AssetBalanceDto>();
@@ -297,6 +304,7 @@ export class BalancesService {
         this.logger.error(
           `Failed to fetch balances for credential ${credential._id}: ${error.message}`,
         );
+        failedExchanges.push(credential.exchange);
         await this.credentialsService.updateLastError(
           credential._id,
           error.message,
@@ -355,6 +363,7 @@ export class BalancesService {
       byExchange: exchangeBalances,
       totalValueUsd,
       lastUpdated: new Date(),
+      failedExchanges,
     };
   }
 

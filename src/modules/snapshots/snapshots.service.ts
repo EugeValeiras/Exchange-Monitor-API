@@ -235,15 +235,62 @@ export class SnapshotsService {
       .slice(0, 5)
       .map((a) => ({ asset: a.asset, valueUsd: a.valueUsd }));
 
+    // Un exchange que no contesta no aborta el snapshot, pero sí lo descalifica
+    // como lectura de la cartera: el 28/08 Binance no respondió y el punto quedó
+    // en 61k contra 106k reales, con 0,5 BTC en vez de 1,08.
+    //
+    // No alcanza con "falló alguno": una credencial puede estar rota de forma
+    // crónica sin aportar saldo (nexo-pro devolviendo 530), y abortar ahí
+    // dejaría la serie vacía para siempre. Lo que descalifica al punto es que el
+    // fallo SE NOTE en el total, así que se pide además una caída brusca contra
+    // la última lectura buena.
+    const failedExchanges = consolidated.failedExchanges ?? [];
+    const isPartial =
+      failedExchanges.length > 0 &&
+      (await this.dropsAgainstLastGoodSnapshot(userIdStr, totalValueUsd));
+
+    if (isPartial) {
+      this.logger.warn(
+        `Snapshot horario de ${userIdStr} marcado como parcial: no contestaron ` +
+          `[${failedExchanges.join(', ')}] y el total cayó a ${Math.round(totalValueUsd)}`,
+      );
+    }
+
     const snapshot = new this.hourlySnapshotModel({
       userId: new Types.ObjectId(userIdStr),
       timestamp: now,
       totalValueUsd,
       topAssets,
       assetBalances,
+      isPartial,
+      missingExchanges: failedExchanges.length ? failedExchanges : undefined,
     });
 
     return snapshot.save();
+  }
+
+  /** Umbral de caída horaria que, junto con un exchange caído, delata una
+   *  lectura incompleta. Una cartera no pierde esto en una hora por mercado. */
+  private static readonly PARTIAL_DROP_RATIO = 0.1;
+
+  /**
+   * ¿El total cae bruscamente contra el último snapshot que sí fue completo?
+   * Sin lectura previa no hay con qué comparar, y se asume buena.
+   */
+  private async dropsAgainstLastGoodSnapshot(
+    userId: string,
+    totalValueUsd: number,
+  ): Promise<boolean> {
+    const lastGood = await this.hourlySnapshotModel
+      .findOne({ userId: new Types.ObjectId(userId), isPartial: { $ne: true } })
+      .sort({ timestamp: -1 })
+      .select('totalValueUsd')
+      .lean();
+
+    if (!lastGood?.totalValueUsd) return false;
+
+    const drop = (lastGood.totalValueUsd - totalValueUsd) / lastGood.totalValueUsd;
+    return drop > SnapshotsService.PARTIAL_DROP_RATIO;
   }
 
   // ==================== CHART DATA ====================
@@ -279,6 +326,7 @@ export class SnapshotsService {
       .findOne({
         userId: new Types.ObjectId(userId),
         timestamp: { $lte: since },
+        isPartial: { $ne: true },
       })
       .sort({ timestamp: -1 });
 
@@ -312,6 +360,7 @@ export class SnapshotsService {
       .find({
         userId: new Types.ObjectId(userId),
         timestamp: { $gte: since },
+        isPartial: { $ne: true },
       })
       .sort({ timestamp: 1 });
 
@@ -368,6 +417,7 @@ export class SnapshotsService {
       .find({
         userId: new Types.ObjectId(userId),
         timestamp: { $gte: since },
+        isPartial: { $ne: true },
       })
       .sort({ timestamp: 1 });
 
@@ -388,6 +438,7 @@ export class SnapshotsService {
       .find({
         userId: new Types.ObjectId(userId),
         timestamp: { $gte: since },
+        isPartial: { $ne: true },
       })
       .sort({ timestamp: 1 });
 

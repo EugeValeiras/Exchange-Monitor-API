@@ -64,4 +64,13 @@ export class ConsolidatedBalanceDto {
 
   @ApiProperty({ example: false, required: false })
   isSyncing?: boolean;
+
+  /**
+   * Exchanges cuya consulta de saldos falló en esta lectura. El consolidado se
+   * devuelve igual —con lo que sí se pudo traer— pero quien lo persista tiene
+   * que saber que está incompleto: un snapshot armado sobre un balance parcial
+   * dibuja un desplome que nunca pasó.
+   */
+  @ApiProperty({ example: [], required: false, type: [String] })
+  failedExchanges?: string[];
 }

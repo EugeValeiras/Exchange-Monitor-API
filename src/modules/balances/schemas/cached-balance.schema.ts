@@ -24,6 +24,9 @@ export interface CachedBalanceData {
   byAsset: CachedAssetBalance[];
   byExchange: CachedExchangeBalance[];
   totalValueUsd: number;
+
+  /** Exchanges que no contestaron en la lectura que produjo este cache. */
+  failedExchanges?: string[];
 }
 
 export type CachedBalanceDocument = CachedBalance & Document;
