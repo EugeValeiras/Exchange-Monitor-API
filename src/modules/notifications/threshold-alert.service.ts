@@ -30,8 +30,19 @@ export class ThresholdAlertService implements OnModuleInit {
     ['SOL', { formatPrice: (p) => `$${p.toFixed(2)}` }],
   ]);
 
-  // In-memory cache of last notified prices
+  /// Último precio notificado POR PAR. La clave es el símbolo entero
+  /// (`NEXO/USDT`), no el activo: llevarlo por activo hacía que las
+  /// cotizaciones de `NEXO/USDT` (0,83) y `NEXO/BTC` (0,0000106) se pisaran
+  /// entre sí y cada update disparara una alerta de −100 % o +7.700.000 %,
+  /// alternándose para siempre.
   private lastNotifiedPrices = new Map<string, number>();
+
+  /// Monedas de cotización que se pueden mostrar con "$". Un par contra BTC
+  /// necesita otro formato, así que por ahora no se notifica: mostrarlo como
+  /// "$0.00" era decir cualquier cosa.
+  private static readonly DOLLAR_QUOTES = new Set([
+    'USD', 'USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP',
+  ]);
 
   constructor(
     @InjectModel(PriceThreshold.name)
@@ -48,8 +59,12 @@ export class ThresholdAlertService implements OnModuleInit {
     try {
       const records = await this.priceThresholdModel.find().exec();
       records.forEach((record) => {
-        // Use lastPrice as the last notified price
-        this.lastNotifiedPrices.set(record.asset, record.lastPrice);
+        // Los registros viejos guardaban sólo el activo. Sin símbolo no se
+        // pueden reusar sin volver a mezclar pares, así que se ignoran: el
+        // primer update de cada par recrea su marca.
+        if (record.symbol) {
+          this.lastNotifiedPrices.set(record.symbol, record.lastPrice);
+        }
       });
       this.logger.log(
         `Loaded ${records.length} last notified prices from database`,
@@ -66,7 +81,9 @@ export class ThresholdAlertService implements OnModuleInit {
     }
 
     const symbol = priceData.symbol;
-    const baseAsset = symbol.split('/')[0].toUpperCase();
+    const [rawAsset, rawQuote] = symbol.split('/');
+    const baseAsset = rawAsset.toUpperCase();
+    const quote = (rawQuote ?? '').toUpperCase();
     const currentPrice = priceData.price;
 
     // Check if this asset is tracked
@@ -75,13 +92,24 @@ export class ThresholdAlertService implements OnModuleInit {
       return;
     }
 
-    const lastNotifiedPrice = this.lastNotifiedPrices.get(baseAsset);
+    // Sólo pares contra dólar: el formato de la alerta lleva "$".
+    if (!ThresholdAlertService.DOLLAR_QUOTES.has(quote)) {
+      return;
+    }
 
-    // First time seeing this asset, initialize with current price
-    if (lastNotifiedPrice === undefined) {
-      await this.updateLastNotifiedPrice(baseAsset, currentPrice);
+    // Un precio en cero no es una cotización: dividir por él da infinito y es
+    // lo que producía los porcentajes de siete cifras.
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
+      return;
+    }
+
+    const lastNotifiedPrice = this.lastNotifiedPrices.get(symbol);
+
+    // First time seeing this pair, initialize with current price
+    if (lastNotifiedPrice === undefined || lastNotifiedPrice <= 0) {
+      await this.updateLastNotifiedPrice(symbol, baseAsset, currentPrice);
       this.logger.log(
-        `Initialized price tracking for ${baseAsset}: ${config.formatPrice(currentPrice)}`,
+        `Initialized price tracking for ${symbol}: ${config.formatPrice(currentPrice)}`,
       );
       return;
     }
@@ -107,20 +135,21 @@ export class ThresholdAlertService implements OnModuleInit {
         percentageChange,
         config,
       );
-
       // Update last notified price
-      await this.updateLastNotifiedPrice(baseAsset, currentPrice);
+      await this.updateLastNotifiedPrice(symbol, baseAsset, currentPrice);
     }
   }
 
   private async updateLastNotifiedPrice(
+    symbol: string,
     asset: string,
     price: number,
   ): Promise<void> {
     try {
       await this.priceThresholdModel.findOneAndUpdate(
-        { asset },
+        { symbol },
         {
+          symbol,
           asset,
           lastThresholdLevel: price, // Keeping field name for backwards compatibility
           lastPrice: price,
@@ -128,7 +157,7 @@ export class ThresholdAlertService implements OnModuleInit {
         },
         { upsert: true },
       );
-      this.lastNotifiedPrices.set(asset, price);
+      this.lastNotifiedPrices.set(symbol, price);
     } catch (error) {
       this.logger.error(`Failed to update last notified price: ${error.message}`);
     }
@@ -150,8 +179,11 @@ export class ThresholdAlertService implements OnModuleInit {
     const title = `${emoji} ${asset} ${arrow} ${config.formatPrice(currentPrice)}`;
     const body = `${asset} ${sign}${changePercent}% (${config.formatPrice(lastPrice)} → ${config.formatPrice(currentPrice)})`;
 
-    // Only notify users who have price-change notifications enabled
-    const allTokens = await this.notificationsService.getEnabledUserTokens();
+    // Sólo a quienes este movimiento les corresponde: su umbral lo cubre y no
+    // están en su franja de silencio.
+    const allTokens = await this.notificationsService.getTokensForPriceChange(
+      percentageChange * 100,
+    );
 
     if (allTokens.length === 0) {
       this.logger.debug(

@@ -87,6 +87,60 @@ export class NotificationsService {
     return allTokens;
   }
 
+  /**
+   * Tokens de los usuarios a los que este movimiento SÍ les corresponde: los
+   * que tienen las alertas activadas, cuyo umbral supera el movimiento, y que
+   * no están en su franja de silencio.
+   *
+   * Antes las alertas de precio salían a todo el que tuviera notificaciones
+   * activadas, sin mirar ni el umbral ni el horario: la pantalla ofrecía los
+   * dos controles y el backend los ignoraba.
+   */
+  async getTokensForPriceChange(absPercentChange: number): Promise<string[]> {
+    const users = await this.usersService.findUsersWithNotificationsEnabled();
+    const tokens: string[] = [];
+
+    for (const user of users) {
+      const settings = user.notificationSettings;
+      if (!settings?.enabled) continue;
+      if (!user.pushTokens?.length) continue;
+
+      const threshold = settings.priceChangeThreshold ?? 5;
+      if (absPercentChange < threshold) continue;
+
+      if (!NotificationsService.isOutsideQuietHours(settings)) continue;
+
+      tokens.push(...user.pushTokens);
+    }
+
+    return tokens;
+  }
+
+  /**
+   * ¿Estamos fuera de la franja de silencio del usuario? Sin franja definida,
+   * siempre. Contempla que cruce la medianoche (23:00 → 08:00).
+   */
+  static isOutsideQuietHours(settings: {
+    quietHoursStart?: string;
+    quietHoursEnd?: string;
+  }): boolean {
+    if (!settings.quietHoursStart || !settings.quietHoursEnd) return true;
+
+    const now = new Date();
+    const currentTime = now.getHours() * 60 + now.getMinutes();
+
+    const [startHour, startMinute] = settings.quietHoursStart.split(':').map(Number);
+    const [endHour, endMinute] = settings.quietHoursEnd.split(':').map(Number);
+    const startTime = startHour * 60 + startMinute;
+    const endTime = endHour * 60 + endMinute;
+
+    if (startTime > endTime) {
+      // La franja cruza la medianoche (23:00 → 08:00).
+      return currentTime >= endTime && currentTime < startTime;
+    }
+    return currentTime < startTime || currentTime >= endTime;
+  }
+
   async getSettings(userId: string): Promise<NotificationSettingsDto> {
     const user = await this.usersService.findById(userId);
     return {

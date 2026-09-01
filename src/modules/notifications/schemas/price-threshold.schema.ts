@@ -5,6 +5,12 @@ export type PriceThresholdDocument = PriceThreshold & Document;
 
 @Schema({ timestamps: true, collection: 'price_thresholds' })
 export class PriceThreshold {
+  /// El PAR, no el activo: `NEXO/USDT` y `NEXO/BTC` cotizan en escalas
+  /// distintas y no pueden compartir el último precio notificado.
+  @Prop({ required: true })
+  symbol: string;
+
+  /// El activo base, para poder buscar por él sin partir el símbolo.
   @Prop({ required: true, index: true })
   asset: string;
 
@@ -21,4 +27,4 @@ export class PriceThreshold {
 export const PriceThresholdSchema =
   SchemaFactory.createForClass(PriceThreshold);
 
-PriceThresholdSchema.index({ asset: 1 }, { unique: true });
+PriceThresholdSchema.index({ symbol: 1 }, { unique: true });
