@@ -18,6 +18,8 @@ type RawTrade = {
   fee?: number;
   feeAsset?: string;
   pair?: string;
+  asset?: string;
+  priceAsset?: string;
   exchange?: string;
   timestamp: string;
 };
@@ -28,7 +30,8 @@ function docFrom(t: RawTrade, i: number) {
     exchange: t.exchange ?? 'binance',
     pair: t.pair ?? 'BTC/USDT',
     type: TransactionType.TRADE,
-    asset: 'BTC',
+    asset: t.asset ?? 'BTC',
+    priceAsset: t.priceAsset ?? 'USDT',
     side: t.side,
     amount: t.amount,
     price: t.price,
@@ -39,14 +42,37 @@ function docFrom(t: RawTrade, i: number) {
   };
 }
 
+/** What the PnL module booked for a transaction, by its (mock) id. */
+type Bookings = Record<string, { kind: 'lot' | 'realized'; amount: number; usdPrice: number }>;
+
 describe('TransactionsService.getTradesByPair', () => {
   let service: TransactionsService;
   let find: jest.Mock;
+  let getBookings: jest.Mock;
 
-  const buildService = async (raw: RawTrade[]) => {
+  const buildService = async (
+    raw: RawTrade[],
+    { cross = [], bookings = {} }: { cross?: RawTrade[]; bookings?: Bookings } = {},
+  ) => {
     const docs = raw.map(docFrom);
-    find = jest.fn().mockReturnValue({
-      sort: () => ({ exec: () => Promise.resolve(docs) }),
+    // cross trades get ids after the pair trades, so `id-<n>` stays unique
+    const crossDocs = cross.map((t, i) => docFrom(t, raw.length + i));
+
+    // one model, two queries: the pair's own trades ($in) and the asset's
+    // trades on other pairs ($nin)
+    find = jest.fn((query: { pair?: { $in?: string[]; $nin?: string[] } }) => ({
+      sort: () => ({
+        exec: () => Promise.resolve(query.pair?.$nin ? crossDocs : docs),
+      }),
+    }));
+
+    getBookings = jest.fn(async (_user: string, _asset: string, ids: string[]) => {
+      const map = new Map();
+      for (const id of ids) {
+        const b = bookings[id];
+        if (b) map.set(id, { ...b, usdTotal: b.amount * b.usdPrice });
+      }
+      return map;
     });
 
     const noop = {};
@@ -57,7 +83,7 @@ describe('TransactionsService.getTradesByPair', () => {
         { provide: ExchangeCredentialsService, useValue: noop },
         { provide: ExchangeFactoryService, useValue: noop },
         { provide: PricesService, useValue: noop },
-        { provide: PnlService, useValue: noop },
+        { provide: PnlService, useValue: { getBookingsForTransactions: getBookings } },
         { provide: SettingsService, useValue: noop },
       ],
     }).compile();
@@ -203,5 +229,142 @@ describe('TransactionsService.getTradesByPair', () => {
 
     expect(position.netAmount).toBeCloseTo(1, 8);
     expect(position.avgEntryPrice).toBeCloseTo(100, 8);
+  });
+
+  describe('the asset on other pairs', () => {
+    // straight from the user's history: NEXO sold for BTC on Binance, booked
+    // by the PnL as a BTC lot at the historical BTC/USD price of that day
+    const nexoForBtc: RawTrade = {
+      side: 'sell',
+      amount: 915.2,
+      price: 0.0000122,
+      pair: 'NEXO/BTC',
+      asset: 'NEXO',
+      priceAsset: 'BTC',
+      feeAsset: 'BTC',
+      timestamp: '2026-03-10',
+    };
+
+    it('asks for the trades of the base asset outside the pair', async () => {
+      await buildService([]);
+      await service.getTradesByPair(USER_ID, 'BTC/USDT');
+
+      expect(find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pair: { $nin: expect.arrayContaining(['BTC/USDT', 'BTC/USD']) },
+          $or: [{ asset: 'BTC' }, { priceAsset: 'BTC' }],
+        }),
+      );
+    });
+
+    it('transcribes a sale for the base asset into a buy of it, at the USD price the PnL booked', async () => {
+      await buildService(
+        [{ side: 'buy', amount: 1, price: 100, timestamp: '2026-01-01' }],
+        {
+          cross: [nexoForBtc],
+          bookings: { 'id-1': { kind: 'lot', amount: 0.01116544, usdPrice: 63258.77 } },
+        },
+      );
+
+      const result = await service.getTradesByPair(USER_ID, 'BTC/USDT');
+
+      expect(getBookings).toHaveBeenCalledWith(USER_ID, 'BTC', ['id-1']);
+      expect(result.crossTradeCount).toBe(1);
+      expect(result.crossTrades).toHaveLength(1);
+
+      const [cross] = result.crossTrades;
+      expect(cross.pair).toBe('NEXO/BTC');
+      expect(cross.asset).toBe('NEXO');
+      expect(cross.side).toBe('sell');
+      expect(cross.amount).toBeCloseTo(915.2, 8);
+      expect(cross.priceAsset).toBe('BTC');
+      expect(cross.base).toEqual({
+        side: 'buy',
+        amount: 0.01116544,
+        usdPrice: 63258.77,
+        usdTotal: expect.closeTo(706.31, 1),
+        source: 'lot',
+      });
+    });
+
+    it('never lets a cross trade move the position of the pair', async () => {
+      await buildService(
+        [{ side: 'buy', amount: 1, price: 100, timestamp: '2026-01-01' }],
+        {
+          cross: [nexoForBtc],
+          bookings: { 'id-1': { kind: 'lot', amount: 0.01116544, usdPrice: 63258.77 } },
+        },
+      );
+
+      const { position } = await service.getTradesByPair(USER_ID, 'BTC/USDT');
+
+      expect(position.netAmount).toBeCloseTo(1, 8);
+      expect(position.avgEntryPrice).toBeCloseTo(100, 8);
+      expect(position.tradeCount).toBe(1);
+    });
+
+    it('reads a buy paid with the base asset as a sale of it', async () => {
+      await buildService([], {
+        cross: [{ ...nexoForBtc, side: 'buy' }],
+        bookings: { 'id-0': { kind: 'realized', amount: 0.01116544, usdPrice: 64000 } },
+      });
+
+      const [cross] = (await service.getTradesByPair(USER_ID, 'BTC/USDT')).crossTrades;
+
+      expect(cross.base.side).toBe('sell');
+      expect(cross.base.source).toBe('realized');
+      expect(cross.base.usdPrice).toBe(64000);
+    });
+
+    it("keeps the trade's own side when the base asset is the one stored", async () => {
+      await buildService([], {
+        cross: [
+          {
+            side: 'buy',
+            amount: 0.5,
+            price: 15.2,
+            pair: 'BTC/ETH',
+            asset: 'BTC',
+            priceAsset: 'ETH',
+            timestamp: '2026-03-10',
+          },
+        ],
+        bookings: { 'id-0': { kind: 'lot', amount: 0.5, usdPrice: 60000 } },
+      });
+
+      const [cross] = (await service.getTradesByPair(USER_ID, 'BTC/USDT')).crossTrades;
+
+      expect(cross.base.side).toBe('buy');
+      expect(cross.base.amount).toBeCloseTo(0.5, 8);
+    });
+
+    it('still lists a trade the PnL never booked, without a USD figure', async () => {
+      await buildService([], { cross: [nexoForBtc] });
+
+      const [cross] = (await service.getTradesByPair(USER_ID, 'BTC/USDT')).crossTrades;
+
+      expect(cross.base.side).toBe('buy');
+      // amount * price, since there is no lot to read it from
+      expect(cross.base.amount).toBeCloseTo(915.2 * 0.0000122, 10);
+      expect(cross.base.usdPrice).toBeNull();
+      expect(cross.base.usdTotal).toBeNull();
+      expect(cross.base.source).toBe('none');
+    });
+
+    it('narrows cross trades to the range but counts the whole history', async () => {
+      await buildService([], {
+        cross: [nexoForBtc, { ...nexoForBtc, timestamp: '2024-01-01' }],
+      });
+
+      const result = await service.getTradesByPair(
+        USER_ID,
+        'BTC/USDT',
+        new Date('2026-01-01').getTime(),
+        new Date('2026-12-31').getTime(),
+      );
+
+      expect(result.crossTrades).toHaveLength(1);
+      expect(result.crossTradeCount).toBe(2);
+    });
   });
 });

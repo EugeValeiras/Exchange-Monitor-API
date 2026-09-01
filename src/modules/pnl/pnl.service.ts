@@ -25,6 +25,14 @@ import { TransactionDocument } from '../transactions/schemas/transaction.schema'
 import { TransactionType } from '../../common/constants/transaction-types.constant';
 import { TransactionsService } from '../transactions/transactions.service';
 
+/** One transaction as the P&L module recorded it for one asset. */
+export interface AssetBooking {
+  kind: 'lot' | 'realized';
+  amount: number;
+  usdPrice: number;
+  usdTotal: number;
+}
+
 @Injectable()
 export class PnlService {
   private readonly logger = new Logger(PnlService.name);
@@ -288,6 +296,51 @@ export class PnlService {
       byAsset,
       periodBreakdown,
     };
+  }
+
+  /**
+   * How this module booked a set of transactions for ONE asset: the lot it
+   * opened (an acquisition) or the realized record it wrote (a disposal),
+   * keyed by transaction id.
+   *
+   * A crypto/crypto trade is stored once but touches two assets, and the
+   * USD figure for the quote side only exists here. This is what lets the
+   * BTC/USDT chart explain what a NEXO/BTC trade did to the BTC position,
+   * using the exact numbers the P&L used, not a recomputation.
+   */
+  async getBookingsForTransactions(
+    userId: string,
+    asset: string,
+    transactionIds: string[],
+  ): Promise<Map<string, AssetBooking>> {
+    const bookings = new Map<string, AssetBooking>();
+    if (!transactionIds.length) return bookings;
+
+    const ids = transactionIds.map((id) => new Types.ObjectId(id));
+    const base = { userId: new Types.ObjectId(userId), asset, transactionId: { $in: ids } };
+
+    const [lots, realized] = await Promise.all([
+      this.costBasisLotModel.find(base).lean(),
+      this.realizedPnlModel.find(base).lean(),
+    ]);
+
+    for (const lot of lots) {
+      bookings.set(lot.transactionId.toString(), {
+        kind: 'lot',
+        amount: lot.originalAmount,
+        usdPrice: lot.costPerUnit,
+        usdTotal: lot.originalAmount * lot.costPerUnit,
+      });
+    }
+    for (const r of realized) {
+      bookings.set(r.transactionId.toString(), {
+        kind: 'realized',
+        amount: r.amount,
+        usdPrice: r.amount > 0 ? r.proceeds / r.amount : 0,
+        usdTotal: r.proceeds,
+      });
+    }
+    return bookings;
   }
 
   /**

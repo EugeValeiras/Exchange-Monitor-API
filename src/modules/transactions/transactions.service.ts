@@ -17,7 +17,8 @@ import {
 } from './dto/transaction-response.dto';
 import { ITransaction } from '../../common/interfaces/exchange-adapter.interface';
 import { equivalentPairs, splitPair } from '../../common/utils/pair.util';
-import { PairTradesDto } from './dto/pair-trades.dto';
+import { CrossTradeDto, PairTradesDto } from './dto/pair-trades.dto';
+import { AssetBooking } from '../pnl/pnl.service';
 
 @Injectable()
 export class TransactionsService {
@@ -137,6 +138,10 @@ export class TransactionsService {
    * Unrealized P&L is deliberately NOT returned: the chart computes it from
    * the last candle it is already drawing, so the number always matches what
    * the user sees.
+   *
+   * Trades of the base asset on OTHER pairs (NEXO/BTC, BTC/ETH) come back
+   * apart as `crossTrades`, transcribed into the base asset with the USD
+   * figures the PnL module booked. They never move `position`.
    */
   async getTradesByPair(
     userId: string,
@@ -199,17 +204,49 @@ export class TransactionsService {
       }
     }
 
-    const inRange = trades.filter((tx) => {
+    const inRange = (tx: TransactionDocument): boolean => {
       const ts = tx.timestamp.getTime();
       if (from !== undefined && ts < from) return false;
       if (to !== undefined && ts > to) return false;
       return true;
-    });
+    };
+    const visible = trades.filter(inRange);
+
+    // ── the asset on other pairs ─────────────────────────────────────────
+    // Selling NEXO for BTC never shows up as a BTC/USDT trade, yet it is BTC
+    // that landed in the account and the PnL module booked it as such. Those
+    // are the trades that make the per-asset cost differ from the per-pair
+    // one, so the screen has to be able to show them — with the numbers the
+    // PnL actually used, not a recomputation.
+    const crossDocs = base
+      ? await this.transactionModel
+          .find({
+            userId: new Types.ObjectId(userId),
+            type: TransactionType.TRADE,
+            pair: { $nin: matchedPairs },
+            $or: [{ asset: base }, { priceAsset: base }],
+          })
+          .sort({ timestamp: 1 })
+          .exec()
+      : [];
+
+    const bookings = base
+      ? await this.pnlService.getBookingsForTransactions(
+          userId,
+          base,
+          crossDocs.map((tx) => tx._id.toString()),
+        )
+      : new Map<string, AssetBooking>();
+
+    const crossTrades = crossDocs
+      .filter(inRange)
+      .map((tx) => this.toCrossTrade(tx, base!, bookings.get(tx._id.toString())))
+      .filter((t): t is CrossTradeDto => t !== null);
 
     return {
       pair: pair.toUpperCase(),
       matchedPairs,
-      trades: inRange.map((tx) => ({
+      trades: visible.map((tx) => ({
         id: tx._id.toString(),
         exchange: tx.exchange,
         pair: tx.pair,
@@ -230,7 +267,55 @@ export class TransactionsService {
         totalSold,
         tradeCount: trades.length,
       },
-      outsideRange: trades.length - inRange.length,
+      outsideRange: trades.length - visible.length,
+      crossTrades,
+      crossTradeCount: crossDocs.length,
+    };
+  }
+
+  /**
+   * Reads a trade from the point of view of the base asset of the pair on
+   * screen. Buying NEXO with BTC is a sale of BTC; selling NEXO for BTC is a
+   * buy of BTC. The USD side comes from what the PnL module booked for that
+   * transaction and asset — when it booked nothing (no historical price that
+   * day), the trade is still listed, just without a USD figure.
+   */
+  private toCrossTrade(
+    tx: TransactionDocument,
+    base: string,
+    booking?: AssetBooking,
+  ): CrossTradeDto | null {
+    const asset = tx.asset?.toUpperCase() ?? '';
+    const priceAsset = tx.priceAsset?.toUpperCase() ?? '';
+    const amount = Math.abs(tx.amount ?? 0);
+    const price = tx.price ?? 0;
+    const side = tx.side === 'sell' ? 'sell' : 'buy';
+
+    const isBaseSide = asset === base;
+    if (!isBaseSide && priceAsset !== base) return null;
+
+    const baseSide = isBaseSide ? side : side === 'buy' ? 'sell' : 'buy';
+    const baseAmount = booking?.amount ?? (isBaseSide ? amount : amount * price);
+
+    return {
+      id: tx._id.toString(),
+      exchange: tx.exchange,
+      pair: tx.pair ?? `${asset}/${priceAsset}`,
+      asset,
+      side,
+      amount,
+      price,
+      priceAsset,
+      fee: tx.fee,
+      feeAsset: tx.feeAsset,
+      timestamp: tx.timestamp,
+      base: {
+        side: baseSide,
+        amount: baseAmount,
+        usdPrice: booking?.usdPrice ?? null,
+        usdTotal: booking?.usdTotal ?? null,
+        source: booking?.kind ?? 'none',
+      },
     };
   }
 
