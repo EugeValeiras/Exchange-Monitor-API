@@ -25,7 +25,7 @@ import { TokenResponseDto } from './dto/token-response.dto';
 export class PasskeyService {
   private readonly rpName = 'Exchange Monitor';
   private readonly rpId: string;
-  private readonly origin: string;
+  private readonly origins: string[];
   private readonly challengeTimeout = 60000; // 60 seconds
 
   constructor(
@@ -34,7 +34,18 @@ export class PasskeyService {
     private readonly configService: ConfigService,
   ) {
     this.rpId = this.configService.get<string>('PASSKEY_RP_ID') || 'localhost';
-    this.origin = this.configService.get<string>('PASSKEY_ORIGIN') || 'http://localhost:3000';
+
+    // Un mismo RP, dos clientes: la app iOS firma contra el dominio declarado en
+    // sus associated domains (eugeniovaleiras.com) y la webapp contra el suyo
+    // (monitor.eugeniovaleiras.com). Los dos son válidos para el mismo rpId
+    // porque es sufijo registrable de ambos, pero cada uno manda SU origin, así
+    // que PASSKEY_ORIGIN acepta una lista separada por comas.
+    this.origins = (
+      this.configService.get<string>('PASSKEY_ORIGIN') || 'http://localhost:3000'
+    )
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
   }
 
   async generateRegistrationChallenge(userId: string): Promise<{
@@ -95,7 +106,7 @@ export class PasskeyService {
       verification = await verifyRegistrationResponse({
         response,
         expectedChallenge: user.currentChallenge,
-        expectedOrigin: this.origin,
+        expectedOrigin: this.origins,
         expectedRPID: this.rpId,
         requireUserVerification: true,
       });
@@ -239,7 +250,7 @@ export class PasskeyService {
       verification = await verifyAuthenticationResponse({
         response,
         expectedChallenge,
-        expectedOrigin: this.origin,
+        expectedOrigin: this.origins,
         expectedRPID: this.rpId,
         authenticator: {
           credentialID: Buffer.from(credential.credentialId, 'base64url'),
