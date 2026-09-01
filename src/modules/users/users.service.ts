@@ -151,6 +151,7 @@ export class UsersService {
       priceChangeThreshold: number;
       quietHoursStart?: string;
       quietHoursEnd?: string;
+      alertAssets?: string[];
     },
   ): Promise<UserDocument> {
     const user = await this.userModel.findByIdAndUpdate(

@@ -1,4 +1,12 @@
-import { IsBoolean, IsNumber, IsOptional, IsString, Min, Max } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  Max,
+} from 'class-validator';
 
 export class NotificationSettingsDto {
   @IsBoolean()
@@ -16,6 +24,13 @@ export class NotificationSettingsDto {
   @IsOptional()
   @IsString()
   quietHoursEnd?: string;
+
+  /// Activos que generan aviso. Omitirlo deja la selección como estaba; un
+  /// array vacío es "no me avises de nada".
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  alertAssets?: string[];
 }
 
 export class NotificationSettingsResponseDto {
@@ -23,4 +38,5 @@ export class NotificationSettingsResponseDto {
   priceChangeThreshold: number;
   quietHoursStart?: string;
   quietHoursEnd?: string;
+  alertAssets?: string[];
 }

@@ -51,6 +51,11 @@ export class User {
     priceChangeThreshold: number;
     quietHoursStart?: string;
     quietHoursEnd?: string;
+    /// Activos que generan aviso. Ausente (no configurado) significa el
+    /// conjunto por defecto, para no cambiarle el comportamiento a quien
+    /// nunca entró a elegir. Vacío significa "ninguno", que es una elección
+    /// legítima y distinta de no haber elegido.
+    alertAssets?: string[];
   };
 
   @Prop({ type: [Object], default: [] })

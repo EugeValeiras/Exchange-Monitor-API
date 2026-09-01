@@ -9,10 +9,7 @@ import {
   PriceThresholdDocument,
 } from './schemas/price-threshold.schema';
 import { AggregatedPrice } from '../prices/websocket/exchange-stream.interface';
-
-interface AssetConfig {
-  formatPrice: (price: number) => string;
-}
+import { formatAlertPrice } from './alert-assets';
 
 @Injectable()
 export class ThresholdAlertService implements OnModuleInit {
@@ -21,14 +18,12 @@ export class ThresholdAlertService implements OnModuleInit {
   // Percentage change required to trigger alert (1% = 0.01)
   private readonly alertPercentage = 0.01;
 
-  // Assets to track with their price formatting
-  private readonly trackedAssets: Map<string, AssetConfig> = new Map([
-    ['BTC', { formatPrice: (p) => `$${p.toLocaleString('en-US', { maximumFractionDigits: 0 })}` }],
-    ['ETH', { formatPrice: (p) => `$${p.toLocaleString('en-US', { maximumFractionDigits: 0 })}` }],
-    ['NEXO', { formatPrice: (p) => `$${p.toFixed(2)}` }],
-    ['MON', { formatPrice: (p) => `$${p.toFixed(4)}` }],
-    ['SOL', { formatPrice: (p) => `$${p.toFixed(2)}` }],
-  ]);
+  /// Activos que le interesan a alguien, cacheados. `handlePriceUpdate` corre
+  /// en cada tick de cada exchange: sin este corte iríamos a la base miles de
+  /// veces por minuto para descubrir que a nadie le importa el activo.
+  private interestedAssets: Set<string> | null = null;
+  private interestedAssetsExpiry = 0;
+  private static readonly INTEREST_TTL_MS = 60_000;
 
   /// Último precio notificado POR PAR. La clave es el símbolo entero
   /// (`NEXO/USDT`), no el activo: llevarlo por activo hacía que las
@@ -53,6 +48,36 @@ export class ThresholdAlertService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.loadLastPricesFromDb();
+  }
+
+  /// Cambiar la selección tiene que sentirse al toque: sin esto habría que
+  /// esperar a que venza el TTL para que el primer aviso nuevo llegue, y
+  /// parecería que el interruptor no hizo nada.
+  @OnEvent('notification.settings.updated')
+  invalidateInterestCache(): void {
+    this.interestedAssets = null;
+    this.interestedAssetsExpiry = 0;
+  }
+
+  private async getInterestedAssets(): Promise<Set<string>> {
+    const now = Date.now();
+    if (this.interestedAssets && now < this.interestedAssetsExpiry) {
+      return this.interestedAssets;
+    }
+
+    try {
+      this.interestedAssets =
+        await this.notificationsService.getAssetsWithInterest();
+      this.interestedAssetsExpiry =
+        now + ThresholdAlertService.INTEREST_TTL_MS;
+    } catch (error) {
+      // Si la base falla, no callamos las alertas para siempre: se reintenta
+      // en el próximo tick con lo último que supimos.
+      this.logger.error(`Failed to load alert assets: ${error.message}`);
+      this.interestedAssets = this.interestedAssets ?? new Set<string>();
+    }
+
+    return this.interestedAssets;
   }
 
   private async loadLastPricesFromDb(): Promise<void> {
@@ -86,9 +111,10 @@ export class ThresholdAlertService implements OnModuleInit {
     const quote = (rawQuote ?? '').toUpperCase();
     const currentPrice = priceData.price;
 
-    // Check if this asset is tracked
-    const config = this.trackedAssets.get(baseAsset);
-    if (!config) {
+    // ¿Le interesa a alguien? Antes esto era una tabla de cinco activos
+    // escrita a mano; ahora sale de lo que cada uno eligió seguir.
+    const interested = await this.getInterestedAssets();
+    if (!interested.has(baseAsset)) {
       return;
     }
 
@@ -109,7 +135,7 @@ export class ThresholdAlertService implements OnModuleInit {
     if (lastNotifiedPrice === undefined || lastNotifiedPrice <= 0) {
       await this.updateLastNotifiedPrice(symbol, baseAsset, currentPrice);
       this.logger.log(
-        `Initialized price tracking for ${symbol}: ${config.formatPrice(currentPrice)}`,
+        `Initialized price tracking for ${symbol}: ${formatAlertPrice(currentPrice)}`,
       );
       return;
     }
@@ -123,7 +149,7 @@ export class ThresholdAlertService implements OnModuleInit {
       const changePercent = (percentageChange * 100).toFixed(2);
 
       this.logger.log(
-        `Price alert for ${baseAsset}: ${config.formatPrice(lastNotifiedPrice)} -> ${config.formatPrice(currentPrice)} (${direction} ${changePercent}%)`,
+        `Price alert for ${baseAsset}: ${formatAlertPrice(lastNotifiedPrice)} -> ${formatAlertPrice(currentPrice)} (${direction} ${changePercent}%)`,
       );
 
       // Send alert to all users with push tokens
@@ -133,7 +159,6 @@ export class ThresholdAlertService implements OnModuleInit {
         lastNotifiedPrice,
         direction,
         percentageChange,
-        config,
       );
       // Update last notified price
       await this.updateLastNotifiedPrice(symbol, baseAsset, currentPrice);
@@ -169,20 +194,20 @@ export class ThresholdAlertService implements OnModuleInit {
     lastPrice: number,
     direction: 'up' | 'down',
     percentageChange: number,
-    config: AssetConfig,
   ): Promise<void> {
     const arrow = direction === 'up' ? '↑' : '↓';
     const emoji = direction === 'up' ? '📈' : '📉';
     const changePercent = (percentageChange * 100).toFixed(1);
     const sign = direction === 'up' ? '+' : '-';
 
-    const title = `${emoji} ${asset} ${arrow} ${config.formatPrice(currentPrice)}`;
-    const body = `${asset} ${sign}${changePercent}% (${config.formatPrice(lastPrice)} → ${config.formatPrice(currentPrice)})`;
+    const title = `${emoji} ${asset} ${arrow} ${formatAlertPrice(currentPrice)}`;
+    const body = `${asset} ${sign}${changePercent}% (${formatAlertPrice(lastPrice)} → ${formatAlertPrice(currentPrice)})`;
 
-    // Sólo a quienes este movimiento les corresponde: su umbral lo cubre y no
-    // están en su franja de silencio.
+    // Sólo a quienes este movimiento les corresponde: siguen este activo, su
+    // umbral lo cubre y no están en su franja de silencio.
     const allTokens = await this.notificationsService.getTokensForPriceChange(
       percentageChange * 100,
+      asset,
     );
 
     if (allTokens.length === 0) {

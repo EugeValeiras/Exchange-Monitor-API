@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { UsersService } from '../users/users.service';
 import { FirebaseService } from './firebase.service';
 import { NotificationSettingsDto } from './dto/notification-settings.dto';
+import { alertAssetsFor, wantsAsset } from './alert-assets';
 
 @Injectable()
 export class NotificationsService {
@@ -10,6 +12,7 @@ export class NotificationsService {
   constructor(
     private readonly usersService: UsersService,
     private readonly firebaseService: FirebaseService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -96,7 +99,10 @@ export class NotificationsService {
    * activadas, sin mirar ni el umbral ni el horario: la pantalla ofrecía los
    * dos controles y el backend los ignoraba.
    */
-  async getTokensForPriceChange(absPercentChange: number): Promise<string[]> {
+  async getTokensForPriceChange(
+    absPercentChange: number,
+    asset: string,
+  ): Promise<string[]> {
     const users = await this.usersService.findUsersWithNotificationsEnabled();
     const tokens: string[] = [];
 
@@ -104,6 +110,9 @@ export class NotificationsService {
       const settings = user.notificationSettings;
       if (!settings?.enabled) continue;
       if (!user.pushTokens?.length) continue;
+
+      // Que el activo esté entre los que eligió seguir.
+      if (!wantsAsset(settings, asset)) continue;
 
       const threshold = settings.priceChangeThreshold ?? 5;
       if (absPercentChange < threshold) continue;
@@ -114,6 +123,31 @@ export class NotificationsService {
     }
 
     return tokens;
+  }
+
+  /**
+   * Unión de los activos que le interesan a alguien con las alertas
+   * activadas.
+   *
+   * Sirve para cortar temprano: `handlePriceUpdate` corre en cada tick de
+   * precio de cada exchange, así que no puede salir a consultar usuarios en
+   * cada uno. Si nadie sigue el activo, el tick se descarta sin tocar la base.
+   */
+  async getAssetsWithInterest(): Promise<Set<string>> {
+    const users = await this.usersService.findUsersWithNotificationsEnabled();
+    const assets = new Set<string>();
+
+    for (const user of users) {
+      const settings = user.notificationSettings;
+      if (!settings?.enabled) continue;
+      if (!user.pushTokens?.length) continue;
+
+      alertAssetsFor(settings).forEach((asset) =>
+        assets.add(asset.toUpperCase()),
+      );
+    }
+
+    return assets;
   }
 
   /**
@@ -148,6 +182,7 @@ export class NotificationsService {
       priceChangeThreshold: user.notificationSettings?.priceChangeThreshold ?? 5,
       quietHoursStart: user.notificationSettings?.quietHoursStart,
       quietHoursEnd: user.notificationSettings?.quietHoursEnd,
+      alertAssets: alertAssetsFor(user.notificationSettings) as string[],
     };
   }
 
@@ -155,13 +190,29 @@ export class NotificationsService {
     userId: string,
     settings: NotificationSettingsDto,
   ): Promise<NotificationSettingsDto> {
-    const updated = await this.usersService.updateNotificationSettings(userId, settings);
+    // Guardar reemplaza el objeto entero, así que un cliente que todavía no
+    // conoce alertAssets —la app publicada, la webapp sin actualizar— borraría
+    // la selección con sólo tocar el umbral. Omitir el campo significa "no lo
+    // toques", no "vaciálo".
+    const current = await this.usersService.findById(userId);
+    const merged = {
+      ...settings,
+      alertAssets:
+        settings.alertAssets ?? current.notificationSettings?.alertAssets,
+    };
+
+    const updated = await this.usersService.updateNotificationSettings(userId, merged);
     this.logger.log(`Notification settings updated for user ${userId}`);
+
+    // El servicio de alertas cachea qué activos sigue alguien; avisarle acá es
+    // lo que hace que destildar un activo se note en el aviso siguiente.
+    this.eventEmitter.emit('notification.settings.updated');
     return {
       enabled: updated.notificationSettings?.enabled ?? false,
       priceChangeThreshold: updated.notificationSettings?.priceChangeThreshold ?? 5,
       quietHoursStart: updated.notificationSettings?.quietHoursStart,
       quietHoursEnd: updated.notificationSettings?.quietHoursEnd,
+      alertAssets: alertAssetsFor(updated.notificationSettings) as string[],
     };
   }
 }
