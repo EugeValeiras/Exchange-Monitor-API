@@ -5,6 +5,16 @@ export class TransactionResponseDto {
   @ApiProperty()
   id: string;
 
+  /**
+   * Cuántas ejecuciones hay detrás de esta fila. 1 salvo que se haya pedido
+   * agrupar y el exchange haya partido la orden.
+   */
+  @ApiProperty({ required: false, default: 1 })
+  fills?: number;
+
+  @ApiProperty({ required: false })
+  orderId?: string;
+
   @ApiProperty()
   exchange: string;
 

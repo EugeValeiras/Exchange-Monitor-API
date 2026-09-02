@@ -92,6 +92,10 @@ export class TransactionsService {
   ): Promise<PaginatedTransactionsDto> {
     const query = this.buildQuery(userId, filter);
 
+    if (filter.groupFills) {
+      return this.findAllGrouped(query, filter);
+    }
+
     const skip = (filter.page - 1) * filter.limit;
     const [transactions, total] = await Promise.all([
       this.transactionModel
@@ -117,6 +121,118 @@ export class TransactionsService {
         pair: t.pair,
         side: t.side,
         timestamp: t.timestamp,
+      })),
+      total,
+      page: filter.page,
+      limit: filter.limit,
+      totalPages: Math.ceil(total / filter.limit),
+    };
+  }
+
+  /**
+   * La misma lista, con las ejecuciones de una orden colapsadas en una fila.
+   *
+   * Se agrupa por `rawData.orderId`, que es lo que identifica la orden que
+   * pusiste; cada ejecución trae el suyo. Lo que no lo tiene —Kraken, las
+   * cargas manuales— queda como está: agrupar sin un identificador sería
+   * juntar operaciones distintas porque cayeron en el mismo minuto.
+   *
+   * El precio de la fila es el promedio PONDERADO por cantidad, que es el
+   * precio al que realmente operaste. El promedio simple mentiría apenas los
+   * tramos tengan tamaños distintos, que es siempre.
+   *
+   * La paginación cuenta órdenes, no ejecuciones: contando ejecuciones, una
+   * página de 20 podía traer tres filas.
+   */
+  private async findAllGrouped(
+    query: Record<string, unknown>,
+    filter: TransactionFilterDto,
+  ): Promise<PaginatedTransactionsDto> {
+    const skip = (filter.page - 1) * filter.limit;
+
+    const groupStage = {
+      $group: {
+        // Sin orderId, cada documento es su propio grupo.
+        _id: {
+          $cond: [
+            { $ifNull: ['$rawData.orderId', false] },
+            { orderId: '$rawData.orderId', exchange: '$exchange' },
+            { doc: '$_id' },
+          ],
+        },
+        docId: { $first: '$_id' },
+        orderId: { $first: '$rawData.orderId' },
+        exchange: { $first: '$exchange' },
+        externalId: { $first: '$externalId' },
+        type: { $first: '$type' },
+        asset: { $first: '$asset' },
+        pair: { $first: '$pair' },
+        side: { $first: '$side' },
+        feeAsset: { $first: '$feeAsset' },
+        priceAsset: { $first: '$priceAsset' },
+        timestamp: { $max: '$timestamp' },
+        amount: { $sum: '$amount' },
+        fee: { $sum: { $ifNull: ['$fee', 0] } },
+        total: { $sum: { $ifNull: ['$total', 0] } },
+        // Ponderar por el valor ABSOLUTO: en una venta la cantidad es
+        // negativa y anularía el peso de su propio tramo.
+        precioPorPeso: {
+          $sum: {
+            $multiply: [{ $ifNull: ['$price', 0] }, { $abs: '$amount' }],
+          },
+        },
+        peso: { $sum: { $abs: '$amount' } },
+        fills: { $sum: 1 },
+      },
+    };
+
+    const priceStage = {
+      $addFields: {
+        price: {
+          $cond: [
+            { $gt: ['$peso', 0] },
+            { $divide: ['$precioPorPeso', '$peso'] },
+            null,
+          ],
+        },
+      },
+    };
+
+    const [rows, counted] = await Promise.all([
+      this.transactionModel.aggregate([
+        { $match: query },
+        groupStage,
+        priceStage,
+        { $sort: { timestamp: -1 } },
+        { $skip: skip },
+        { $limit: filter.limit },
+      ]),
+      this.transactionModel.aggregate([
+        { $match: query },
+        groupStage,
+        { $count: 'total' },
+      ]),
+    ]);
+
+    const total = counted[0]?.total ?? 0;
+
+    return {
+      data: rows.map((r) => ({
+        id: r.docId.toString(),
+        exchange: r.exchange,
+        externalId: r.externalId,
+        type: r.type,
+        asset: r.asset,
+        amount: r.amount,
+        fee: r.fee || undefined,
+        feeAsset: r.feeAsset,
+        price: r.price ?? undefined,
+        priceAsset: r.priceAsset,
+        pair: r.pair,
+        side: r.side,
+        timestamp: r.timestamp,
+        fills: r.fills,
+        orderId: r.orderId,
       })),
       total,
       page: filter.page,
@@ -262,6 +378,7 @@ export class TransactionsService {
       endDate?: string;
       types?: string;
       assets?: string;
+      groupFills?: boolean;
     },
   ): Promise<TransactionStatsDto> {
     // Build the main query with all filters
@@ -306,7 +423,21 @@ export class TransactionsService {
     const byExchange: Record<string, number> = {};
     const byAsset: Record<string, number> = {};
 
+    // Cuando la lista viene agrupada, TODOS los contadores cuentan órdenes:
+    // que el total dijera 62 y el chip de Binance 142 obliga a preguntarse
+    // cuál de los dos miente.
+    const ordenesVistas = new Set<string>();
+
     for (const tx of transactions) {
+      if (filter?.groupFills) {
+        const orderId = (tx.rawData as { orderId?: string })?.orderId;
+        const clave = orderId
+          ? `${tx.exchange}:${orderId}`
+          : tx._id.toString();
+        if (ordenesVistas.has(clave)) continue;
+        ordenesVistas.add(clave);
+      }
+
       byType[tx.type] = (byType[tx.type] || 0) + 1;
       byExchange[tx.exchange] = (byExchange[tx.exchange] || 0) + 1;
       byAsset[tx.asset] = (byAsset[tx.asset] || 0) + 1;
@@ -336,7 +467,9 @@ export class TransactionsService {
     }
 
     return {
-      totalTransactions: transactions.length,
+      totalTransactions: filter?.groupFills
+        ? ordenesVistas.size
+        : transactions.length,
       byType,
       byExchange,
       byAsset,

@@ -48,6 +48,7 @@ export class TransactionsController {
     @Query('endDate') endDate?: string,
     @Query('types') types?: string,
     @Query('assets') assets?: string,
+    @Query('groupFills') groupFills?: string,
   ): Promise<TransactionStatsDto> {
     return this.transactionsService.getStats(userId, {
       exchange,
@@ -55,6 +56,7 @@ export class TransactionsController {
       endDate,
       types,
       assets,
+      groupFills: groupFills === 'true',
     });
   }
 

@@ -1,10 +1,26 @@
-import { IsOptional, IsString, IsEnum, IsDateString, IsNumber, Min } from 'class-validator';
+import { IsOptional, IsString, IsEnum, IsDateString, IsNumber, IsBoolean, Min } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { TransactionType } from '../../../common/constants/transaction-types.constant';
 import { ExchangeType } from '../../../common/constants/exchanges.constant';
 
 export class TransactionFilterDto {
+  /**
+   * Junta en una sola fila las ejecuciones de una misma orden.
+   *
+   * Un exchange parte una orden grande contra varios niveles del libro y
+   * devuelve cada ejecución como un trade aparte: 142 filas para 44 órdenes,
+   * y una sola llegó a ocupar 52 renglones seguidos. Agrupar es una decisión
+   * de PRESENTACIÓN — el P&L y los lotes se siguen calculando con las
+   * ejecuciones — y por eso viene apagado: quien pide la lista cruda la
+   * sigue recibiendo igual.
+   */
+  @ApiProperty({ required: false, default: false })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  groupFills?: boolean = false;
+
   @ApiProperty({ required: false, default: 1 })
   @IsOptional()
   @Transform(({ value }) => parseInt(value))
