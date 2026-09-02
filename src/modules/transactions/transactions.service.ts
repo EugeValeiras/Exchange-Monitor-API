@@ -41,6 +41,14 @@ export class TransactionsService {
     userId: string,
     filter: TransactionFilterDto,
   ): FilterQuery<Transaction> {
+    // Las ejecuciones de una orden concreta: el detalle de una fila agrupada.
+    if (filter.orderId) {
+      return {
+        userId: new Types.ObjectId(userId),
+        'rawData.orderId': filter.orderId,
+      } as FilterQuery<Transaction>;
+    }
+
     const query: FilterQuery<Transaction> = {
       userId: new Types.ObjectId(userId),
     };

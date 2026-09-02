@@ -21,6 +21,15 @@ export class TransactionFilterDto {
   @IsBoolean()
   groupFills?: boolean = false;
 
+  /**
+   * Las ejecuciones de UNA orden. Es lo que pide la lista cuando abrís una
+   * fila agrupada para ver los tramos que la componen.
+   */
+  @ApiProperty({ required: false, example: '107677632' })
+  @IsOptional()
+  @IsString()
+  orderId?: string;
+
   @ApiProperty({ required: false, default: 1 })
   @IsOptional()
   @Transform(({ value }) => parseInt(value))
