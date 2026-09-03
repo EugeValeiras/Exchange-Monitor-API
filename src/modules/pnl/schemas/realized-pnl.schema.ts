@@ -54,6 +54,14 @@ export class RealizedPnl {
 
   @Prop({ required: true })
   exchange: string;
+
+  /**
+   * 'sale' es una venta de verdad. 'withdrawal' es un retiro a un lugar que no
+   * vemos: los lotes salen al costo, con ganancia cero, y esta marca es lo que
+   * permite no contarlo como resultado.
+   */
+  @Prop({ type: String, default: 'sale' })
+  source?: string;
 }
 
 export const RealizedPnlSchema = SchemaFactory.createForClass(RealizedPnl);

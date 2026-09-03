@@ -706,6 +706,14 @@ export class TransactionsService {
   /**
    * Get all transactions for a user sorted by timestamp (for P&L recalculation)
    */
+  /** Activos que aparecen en al menos una transacción del usuario. */
+  async findAssetsWithTransactions(userId: string): Promise<Set<string>> {
+    const assets: string[] = await this.transactionModel.distinct('asset', {
+      userId: new Types.ObjectId(userId),
+    });
+    return new Set(assets.map((a) => a.toUpperCase()));
+  }
+
   async findAllByUserSorted(userId: string): Promise<TransactionDocument[]> {
     return this.transactionModel
       .find({ userId: new Types.ObjectId(userId) })

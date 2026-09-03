@@ -24,6 +24,12 @@ import {
 import { TransactionDocument } from '../transactions/schemas/transaction.schema';
 import { TransactionType } from '../../common/constants/transaction-types.constant';
 import { TransactionsService } from '../transactions/transactions.service';
+import {
+  CachedBalance,
+  CachedBalanceDocument,
+} from '../balances/schemas/cached-balance.schema';
+import { emparejarTransferenciasInternas } from './transferencias-internas';
+import { ReconciliacionDto, ReconciliacionDeActivoDto } from './dto/pnl-response.dto';
 
 @Injectable()
 export class PnlService {
@@ -34,6 +40,8 @@ export class PnlService {
     private costBasisLotModel: Model<CostBasisLotDocument>,
     @InjectModel(RealizedPnl.name)
     private realizedPnlModel: Model<RealizedPnlDocument>,
+    @InjectModel(CachedBalance.name)
+    private cachedBalanceModel: Model<CachedBalanceDocument>,
     private readonly pricesService: PricesService,
     private readonly priceHistoryService: PriceHistoryService,
     @Inject(forwardRef(() => TransactionsService))
@@ -41,43 +49,36 @@ export class PnlService {
   ) {}
 
   /**
-   * Process a transaction and update cost basis / realized P&L
+   * Qué le hace una transacción a los lotes.
+   *
+   * Los movimientos de fondos —depósitos y retiros— sólo se contabilizan
+   * cuando se pasa `transferenciasInternas`, o sea desde recalculateAll, que
+   * tiene la historia completa para emparejar un retiro con su depósito. En
+   * el alta incremental el depósito puede no haber llegado todavía, y tratar
+   * al retiro como salida real consumiría lotes que después nadie repone.
    */
-  async processTransaction(tx: TransactionDocument): Promise<void> {
+  async processTransaction(
+    tx: TransactionDocument,
+    transferenciasInternas?: Set<string>,
+  ): Promise<void> {
     const userId = tx.userId.toString();
+    const asset = tx.asset.toUpperCase();
 
-    // Build trade detail for lot metadata
-    const tradeDetail = tx.type === TransactionType.TRADE
-      ? { pair: tx.pair, priceAsset: tx.priceAsset, originalPrice: tx.price }
-      : undefined;
-
-    // Determine if this adds to cost basis or realizes gains
-    if (this.isAcquisition(tx)) {
-      const pricePerUnit = await this.resolveUsdPrice(tx);
-
-      await this.addLot(
-        userId,
-        tx.asset,
-        tx.amount,
-        pricePerUnit,
-        tx.timestamp,
-        tx._id.toString(),
-        tx.exchange,
-        tx.type,
-        tradeDetail,
-      );
-    } else if (this.isDisposal(tx)) {
-      const pricePerUnit = await this.resolveUsdPrice(tx);
-
-      await this.consumeLotsFIFO(
-        userId,
-        tx.asset,
-        tx.amount,
-        pricePerUnit,
-        tx.timestamp,
-        tx._id.toString(),
-        tx.exchange,
-      );
+    // Un dólar estable vale un dólar: no tiene costo que seguir ni ganancia
+    // que realizar. Seguirle lotes sólo producía saldos fantasma (36.373 USDC
+    // "en lotes" contra 4,22 reales) porque se creaban al comprarlo y nadie
+    // los consumía al gastarlo.
+    if (!PnlService.USD_STABLECOINS.includes(asset)) {
+      if (tx.type === TransactionType.TRADE) {
+        await this.contabilizarTrade(tx);
+      } else if (tx.type === TransactionType.INTEREST) {
+        await this.contabilizarInteres(tx);
+      } else if (
+        (tx.type === TransactionType.DEPOSIT || tx.type === TransactionType.WITHDRAWAL) &&
+        transferenciasInternas
+      ) {
+        await this.contabilizarMovimientoDeFondos(tx, transferenciasInternas);
+      }
     }
 
     // Crypto/crypto trades have TWO sides. The base asset (tx.asset) is
@@ -86,6 +87,77 @@ export class PnlService {
     // Skip when priceAsset is a USD stablecoin (or missing) — those don't
     // track cost basis.
     await this.processCounterSide(tx);
+  }
+
+  private async contabilizarTrade(tx: TransactionDocument): Promise<void> {
+    const userId = tx.userId.toString();
+    const tradeDetail = { pair: tx.pair, priceAsset: tx.priceAsset, originalPrice: tx.price };
+    const pricePerUnit = await this.resolveUsdPrice(tx);
+
+    // La comisión cobrada en el mismo activo no llega a la billetera: comprás
+    // 0,03685 BTC, pagás 0,00003 de comisión en BTC y te quedan 0,03682.
+    const comisionEnElActivo =
+      tx.fee && tx.fee > 0 && (tx.feeAsset ?? '').toUpperCase() === tx.asset.toUpperCase()
+        ? tx.fee
+        : 0;
+
+    if (tx.side === 'buy') {
+      const recibido = tx.amount - comisionEnElActivo;
+      if (recibido <= 0) return;
+      await this.addLot(
+        userId, tx.asset, recibido, pricePerUnit, tx.timestamp,
+        tx._id.toString(), tx.exchange, tx.type, tradeDetail,
+      );
+    } else if (tx.side === 'sell') {
+      await this.consumeLotsFIFO(
+        userId, tx.asset, tx.amount + comisionEnElActivo, pricePerUnit,
+        tx.timestamp, tx._id.toString(), tx.exchange,
+      );
+    }
+  }
+
+  /**
+   * El interés es ingreso: el costo de lo que te pagan es lo que valía el día
+   * que te lo pagaron. Sin esto, los 5.104 NEXO que entraron por interés no
+   * existían para la contabilidad y venderlos se descontaba de compras
+   * anteriores, a otro precio.
+   */
+  private async contabilizarInteres(tx: TransactionDocument): Promise<void> {
+    if (!(tx.amount > 0)) return;
+    const precio = await this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
+    await this.addLot(
+      tx.userId.toString(), tx.asset, tx.amount, precio, tx.timestamp,
+      tx._id.toString(), tx.exchange, TransactionType.INTEREST,
+    );
+  }
+
+  /**
+   * Un traspaso entre tus propios exchanges no es nada para los lotes. Un
+   * depósito que no viene de ningún retiro tuyo es una adquisición al precio
+   * del día; un retiro que no llega a ningún exchange tuyo saca los lotes de
+   * la contabilidad AL COSTO: la plata se fue de lo que vemos, pero no se
+   * vendió, así que no hay ganancia que anotar.
+   */
+  private async contabilizarMovimientoDeFondos(
+    tx: TransactionDocument,
+    transferenciasInternas: Set<string>,
+  ): Promise<void> {
+    if (transferenciasInternas.has(tx._id.toString())) return;
+    if (!(tx.amount > 0)) return;
+
+    const userId = tx.userId.toString();
+    if (tx.type === TransactionType.DEPOSIT) {
+      const precio = await this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
+      await this.addLot(
+        userId, tx.asset, tx.amount, precio, tx.timestamp,
+        tx._id.toString(), tx.exchange, TransactionType.DEPOSIT,
+      );
+    } else {
+      await this.consumeLotsFIFO(
+        userId, tx.asset, tx.amount, 0, tx.timestamp,
+        tx._id.toString(), tx.exchange, { aCosto: true, source: 'withdrawal' },
+      );
+    }
   }
 
   /**
@@ -355,6 +427,7 @@ export class PnlService {
   ): Promise<RealizedPnlItemDto[]> {
     const query: Record<string, unknown> = {
       userId: new Types.ObjectId(userId),
+      source: { $ne: 'withdrawal' },
     };
 
     if (startDate || endDate) {
@@ -401,6 +474,7 @@ export class PnlService {
   ): Promise<PaginatedRealizedPnlDto> {
     const query: Record<string, unknown> = {
       userId: new Types.ObjectId(userId),
+      source: { $ne: 'withdrawal' },
     };
 
     if (startDate || endDate) {
@@ -614,10 +688,24 @@ export class PnlService {
 
     this.logger.log(`Processing ${transactions.length} transactions for P&L recalculation`);
 
+    const internas = emparejarTransferenciasInternas(
+      transactions
+        .filter((tx) => tx.type === TransactionType.DEPOSIT || tx.type === TransactionType.WITHDRAWAL)
+        .map((tx) => ({
+          id: tx._id.toString(),
+          asset: tx.asset,
+          exchange: tx.exchange,
+          type: tx.type as 'deposit' | 'withdrawal',
+          amount: tx.amount,
+          timestamp: tx.timestamp,
+        })),
+    );
+    this.logger.log(`${internas.size / 2} traspasos internos emparejados; no mueven lotes`);
+
     let processed = 0;
     for (const tx of transactions) {
       try {
-        await this.processTransaction(tx);
+        await this.processTransaction(tx, internas);
         processed++;
       } catch (error) {
         this.logger.warn(`Failed to process transaction ${tx._id}: ${error.message}`);
@@ -918,14 +1006,6 @@ export class PnlService {
     return this.getHistoricalPriceForTransaction(tx.asset, tx.timestamp);
   }
 
-  private isAcquisition(tx: TransactionDocument): boolean {
-    return tx.type === TransactionType.TRADE && tx.side === 'buy';
-  }
-
-  private isDisposal(tx: TransactionDocument): boolean {
-    return tx.type === TransactionType.TRADE && tx.side === 'sell';
-  }
-
   private async addLot(
     userId: string,
     asset: string,
@@ -967,6 +1047,7 @@ export class PnlService {
     realizedAt: Date,
     transactionId: string,
     exchange: string,
+    opciones: { aCosto?: boolean; source?: string } = {},
   ): Promise<void> {
     // Get oldest lots first (FIFO)
     const lots = await this.costBasisLotModel
@@ -1012,7 +1093,8 @@ export class PnlService {
     }
 
     const actualSold = amount - remainingToSell;
-    const proceeds = actualSold * proceedsPerUnit;
+    // "Al costo": los lotes salen de la contabilidad sin ganancia ni pérdida.
+    const proceeds = opciones.aCosto ? totalCostBasis : actualSold * proceedsPerUnit;
     const realizedPnl = proceeds - totalCostBasis;
 
     // Determine holding period (>1 year = long term)
@@ -1037,6 +1119,7 @@ export class PnlService {
       holdingPeriod,
       lotBreakdown,
       exchange,
+      source: opciones.source ?? 'sale',
     });
 
     await realizedRecord.save();
@@ -1044,6 +1127,67 @@ export class PnlService {
     this.logger.debug(
       `Realized P&L: ${realizedPnl.toFixed(2)} USD from ${actualSold} ${asset}`,
     );
+  }
+
+  /** Diferencia relativa a partir de la cual un activo NO reconcilia. */
+  private static readonly TOLERANCIA_RECONCILIACION = 0.01;
+
+  /**
+   * Lo que dicen los lotes contra lo que hay de verdad en los exchanges.
+   *
+   * Es la pregunta que decide si la contabilidad de un activo sirve para algo
+   * —dibujarla en un gráfico, por ejemplo— o si hay que arreglar la historia
+   * primero. Un activo con saldo y cero transacciones (el polvo de un
+   * airdrop) nunca va a reconciliar, y no es culpa de la contabilidad.
+   */
+  async reconciliar(userId: string): Promise<ReconciliacionDto> {
+    const uid = new Types.ObjectId(userId);
+    const [enLotes, cache, conHistoria] = await Promise.all([
+      this.costBasisLotModel.aggregate<{ _id: string; total: number }>([
+        { $match: { userId: uid, remainingAmount: { $gt: 0 } } },
+        { $group: { _id: '$asset', total: { $sum: '$remainingAmount' } } },
+      ]),
+      this.cachedBalanceModel.findOne({ userId: uid }).lean(),
+      this.transactionsService.findAssetsWithTransactions(userId),
+    ]);
+
+    const lotes = new Map(enLotes.map((l) => [l._id.toUpperCase(), l.total]));
+    const reales = new Map(
+      (cache?.data?.byAsset ?? []).map((b) => [b.asset.toUpperCase(), b.total]),
+    );
+    const activos = new Set([...lotes.keys(), ...reales.keys()]);
+
+    const detalle: ReconciliacionDeActivoDto[] = [];
+    for (const asset of activos) {
+      if (PnlService.USD_STABLECOINS.includes(asset)) continue;
+      const enLotesDelActivo = lotes.get(asset) ?? 0;
+      const real = reales.get(asset) ?? 0;
+      if (enLotesDelActivo === 0 && real === 0) continue;
+
+      const diferencia = enLotesDelActivo - real;
+      const tolerancia = Math.max(Math.abs(real) * PnlService.TOLERANCIA_RECONCILIACION, 1e-8);
+      const sinHistoria = !conHistoria.has(asset);
+      detalle.push({
+        asset,
+        enLotes: enLotesDelActivo,
+        real,
+        diferencia,
+        reconcilia: Math.abs(diferencia) <= tolerancia,
+        motivo: sinHistoria
+          ? 'sin transacciones'
+          : Math.abs(diferencia) <= tolerancia
+            ? null
+            : diferencia > 0
+              ? 'los lotes tienen de más'
+              : 'los lotes tienen de menos',
+      });
+    }
+
+    detalle.sort((a, b) => Math.abs(b.real) - Math.abs(a.real));
+    return {
+      saldosDe: cache?.lastSyncAt ?? null,
+      activos: detalle,
+    };
   }
 
   private sumRealizedAfter(
