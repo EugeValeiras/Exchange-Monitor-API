@@ -101,3 +101,16 @@ describe('alert-assets · qué se avisa y cómo se escribe', () => {
     });
   });
 });
+
+describe('alert-assets · contratos con moneda de liquidación', () => {
+  it('lee la cotización de antes de los dos puntos', () => {
+    // "MON/USDT:USDT" es notación de contrato. Sin normalizar, MON quedaba
+    // fuera de la traducción de la selección vieja por parecer que no
+    // cotizaba en dólares.
+    expect(splitSymbol('MON/USDT:USDT')).toEqual({
+      base: 'MON',
+      quote: 'USDT',
+    });
+    expect(wantsSymbol({ alertAssets: ['MON'] }, 'MON/USDT:USDT')).toBe(true);
+  });
+});

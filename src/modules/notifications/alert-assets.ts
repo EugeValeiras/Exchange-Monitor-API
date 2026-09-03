@@ -43,12 +43,19 @@ export function isDollarQuote(quote: string): boolean {
   return DOLLAR_QUOTES.has(quote.toUpperCase());
 }
 
-/** `NEXO/BTC` → `{ base: 'NEXO', quote: 'BTC' }`. */
+/**
+ * `NEXO/BTC` → `{ base: 'NEXO', quote: 'BTC' }`.
+ *
+ * La cotización puede venir con la moneda de liquidación pegada
+ * —`MON/USDT:USDT`, notación de contratos— y lo que importa es la de antes
+ * de los dos puntos. Sin esto, MON quedaba fuera de la traducción de la
+ * selección vieja por parecer una moneda que no es dólar.
+ */
 export function splitSymbol(symbol: string): { base: string; quote: string } {
   const [rawBase, rawQuote] = symbol.split('/');
   return {
     base: (rawBase ?? '').toUpperCase(),
-    quote: (rawQuote ?? '').toUpperCase(),
+    quote: (rawQuote ?? '').split(':')[0].toUpperCase(),
   };
 }
 
