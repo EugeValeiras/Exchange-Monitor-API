@@ -1,0 +1,66 @@
+import { emparejarTransferenciasInternas, MovimientoDeFondos } from './transferencias-internas';
+
+const en = (min: number) => new Date(Date.UTC(2026, 0, 6, 18, 30 + min));
+
+function mov(
+  id: string,
+  type: 'deposit' | 'withdrawal',
+  exchange: string,
+  amount: number,
+  minutos: number,
+  asset = 'BTC',
+): MovimientoDeFondos {
+  return { id, type, exchange, amount, asset, timestamp: en(minutos) };
+}
+
+describe('emparejarTransferenciasInternas · la misma plata cambiando de lugar', () => {
+  it('empareja un retiro con el depósito que lo recibe en otro exchange', () => {
+    const internas = emparejarTransferenciasInternas([
+      mov('r1', 'withdrawal', 'binance', 0.99764623, 0),
+      mov('d1', 'deposit', 'nexo-manual', 0.99764623, 36),
+    ]);
+    expect(internas).toEqual(new Set(['r1', 'd1']));
+  });
+
+  it('tolera la comisión de red: el caso real del 06/01/2026', () => {
+    // Salieron 0,50000003 de Nexo y entraron 0,49994512 en Binance.
+    const internas = emparejarTransferenciasInternas([
+      mov('d', 'deposit', 'binance', 0.49994512, 0),
+      mov('r', 'withdrawal', 'nexo-manual', 0.50000003, 147),
+    ]);
+    expect(internas.size).toBe(2);
+  });
+
+  it('NO empareja dentro del mismo exchange ni entre activos distintos', () => {
+    const internas = emparejarTransferenciasInternas([
+      mov('r', 'withdrawal', 'binance', 1, 0),
+      mov('d-mismo', 'deposit', 'binance', 1, 10),
+      mov('d-otro-activo', 'deposit', 'kraken', 1, 10, 'ETH'),
+    ]);
+    expect(internas.size).toBe(0);
+  });
+
+  it('NO empareja si el depósito tarda más que la ventana', () => {
+    const internas = emparejarTransferenciasInternas([
+      mov('r', 'withdrawal', 'binance', 1, 0),
+      mov('d', 'deposit', 'kraken', 1, 13 * 60),
+    ]);
+    expect(internas.size).toBe(0);
+  });
+
+  it('un retiro de verdad —a una billetera afuera— queda sin par', () => {
+    const internas = emparejarTransferenciasInternas([
+      mov('r1', 'withdrawal', 'nexo-manual', 33250.7, 0, 'NEXO'),
+    ]);
+    expect(internas.size).toBe(0);
+  });
+
+  it('cada depósito se usa una sola vez', () => {
+    const internas = emparejarTransferenciasInternas([
+      mov('r1', 'withdrawal', 'binance', 1, 0),
+      mov('r2', 'withdrawal', 'binance', 1, 5),
+      mov('d1', 'deposit', 'kraken', 1, 20),
+    ]);
+    expect(internas).toEqual(new Set(['r1', 'd1']));
+  });
+});

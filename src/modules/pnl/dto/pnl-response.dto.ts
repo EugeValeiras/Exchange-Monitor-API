@@ -202,3 +202,24 @@ export class PnlEvolutionDto {
   @ApiProperty()
   timeframe: string;
 }
+
+export class ReconciliacionDeActivoDto {
+  @ApiProperty() asset: string;
+  @ApiProperty({ description: 'Suma de remainingAmount de los lotes abiertos' })
+  enLotes: number;
+  @ApiProperty({ description: 'Saldo real según la última lectura de los exchanges' })
+  real: number;
+  @ApiProperty({ description: 'enLotes - real' })
+  diferencia: number;
+  @ApiProperty() reconcilia: boolean;
+  @ApiProperty({ nullable: true, description: 'Por qué no reconcilia, cuando no reconcilia' })
+  motivo: string | null;
+}
+
+export class ReconciliacionDto {
+  @ApiProperty({ nullable: true, description: 'Fecha de la lectura de saldos contra la que se comparó' })
+  saldosDe: Date | null;
+  @ApiProperty({ type: [ReconciliacionDeActivoDto] })
+  activos: ReconciliacionDeActivoDto[];
+}
+

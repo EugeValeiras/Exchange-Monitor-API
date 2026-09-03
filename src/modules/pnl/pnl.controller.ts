@@ -16,6 +16,7 @@ import {
   PaginatedRealizedPnlDto,
   PaginatedCostBasisLotsDto,
   PnlEvolutionDto,
+  ReconciliacionDto,
 } from './dto/pnl-response.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -139,6 +140,15 @@ export class PnlController {
       this.pnlService.getAvailableExchanges(userId),
     ]);
     return { assets, exchanges };
+  }
+
+  @Get('reconciliation')
+  @ApiOperation({
+    summary: 'Lo que dicen los lotes contra el saldo real, activo por activo',
+  })
+  @ApiResponse({ status: 200, type: ReconciliacionDto })
+  async reconciliar(@CurrentUser('userId') userId: string): Promise<ReconciliacionDto> {
+    return this.pnlService.reconciliar(userId);
   }
 
   @Post('recalculate')
