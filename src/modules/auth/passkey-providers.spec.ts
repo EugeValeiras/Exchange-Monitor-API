@@ -6,9 +6,11 @@ describe('proveedorDePasskey · quién guarda la llave', () => {
       id: 'apple',
       nombre: 'Llavero de iCloud',
     });
+    // El gestor de Google tiene logo propio —la llave de colores— y no es el
+    // mismo que el de Chrome, así que va con su propio id.
     expect(proveedorDePasskey('ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4')).toEqual({
-      id: 'google',
-      nombre: 'Gestor de Google',
+      id: 'google-password-manager',
+      nombre: 'Gestor de contraseñas de Google',
     });
     expect(proveedorDePasskey('bada5566-a7aa-401f-bd96-45619a55120d')).toEqual({
       id: '1password',

@@ -22,7 +22,10 @@ const PROVEEDORES: Record<string, Proveedor> = {
   'fbfc3007-154e-4ecc-8c0b-6e020557d7bd': { id: 'apple', nombre: 'Llavero de iCloud' },
   'dd4ec289-e01d-41c9-bb89-70fa845d4bf2': { id: 'apple', nombre: 'Llavero de iCloud' },
   // Google
-  'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4': { id: 'google', nombre: 'Gestor de Google' },
+  'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4': {
+    id: 'google-password-manager',
+    nombre: 'Gestor de contraseñas de Google',
+  },
   'adce0002-35bc-c60a-648b-0b25f1f05503': { id: 'google', nombre: 'Chrome' },
   // Microsoft
   '08987058-cadc-4b81-b6e1-30de50dcbe96': { id: 'microsoft', nombre: 'Windows Hello' },
