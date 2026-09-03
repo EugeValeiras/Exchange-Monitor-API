@@ -20,6 +20,7 @@ import type {
 import { UsersService } from '../users/users.service';
 import { PasskeyCredential } from '../users/schemas/user.schema';
 import { TokenResponseDto } from './dto/token-response.dto';
+import { proveedorDePasskey } from './passkey-providers';
 
 @Injectable()
 export class PasskeyService {
@@ -120,7 +121,8 @@ export class PasskeyService {
       throw new BadRequestException('Registration verification failed');
     }
 
-    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    const { credentialID, credentialPublicKey, counter, aaguid } =
+      verification.registrationInfo;
 
     const newCredential: PasskeyCredential = {
       credentialId: Buffer.from(credentialID).toString('base64url'),
@@ -128,6 +130,8 @@ export class PasskeyService {
       counter: counter,
       transports: response.response.transports || ['internal'],
       deviceName: deviceName || 'Unknown Device',
+      // Viene en el registro y es lo único que dice quién guarda la llave.
+      aaguid,
       createdAt: new Date(),
     };
 
@@ -313,6 +317,7 @@ export class PasskeyService {
     passkeys: Array<{
       id: string;
       deviceName: string;
+      provider: string | null;
       createdAt: Date;
       lastUsedAt?: Date;
     }>;
@@ -323,6 +328,10 @@ export class PasskeyService {
       passkeys: (user.passkeys || []).map((p) => ({
         id: p.credentialId,
         deviceName: p.deviceName || 'Unknown Device',
+        // Null cuando el autenticador no declaró su AAGUID o no la conocemos.
+        // Las credenciales registradas antes de guardarla también dan null:
+        // el dato no estaba, y no se puede deducir después.
+        provider: proveedorDePasskey(p.aaguid),
         createdAt: p.createdAt,
         lastUsedAt: p.lastUsedAt,
       })),

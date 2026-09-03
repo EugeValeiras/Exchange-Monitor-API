@@ -61,6 +61,15 @@ export class VerifyPasskeyAuthenticationDto {
 }
 
 export class PasskeyListItemDto {
+  @ApiProperty({
+    required: false,
+    nullable: true,
+    example: 'Llavero de iCloud',
+    description:
+      'Quién guarda la llave. Null si el autenticador no lo declaró.',
+  })
+  provider?: string | null;
+
   @ApiProperty({ description: 'Credential ID' })
   id: string;
 

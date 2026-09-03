@@ -9,6 +9,10 @@ export class PasskeyCredential {
   counter: number;           // Anti-replay counter
   transports: string[];      // ['internal', 'hybrid', etc.]
   deviceName?: string;       // e.g., "iPhone 15"
+  /// Identifica QUÉ guarda la llave: el llavero de iCloud, el gestor de
+  /// Google, 1Password. El nombre del dispositivo lo pone el usuario y no
+  /// dice dónde vive la credencial.
+  aaguid?: string;
   createdAt: Date;
   lastUsedAt?: Date;
 }
