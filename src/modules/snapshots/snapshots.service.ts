@@ -72,7 +72,18 @@ export class SnapshotsService {
     }
 
     // Get prices
-    const pricesMap = await this.pricesService.getPricesMap(Array.from(assets));
+    const { precios: pricesMap, arrastrados } = await this.reponerPreciosCaidos(
+      userIdStr,
+      consolidated.byAsset,
+      await this.pricesService.getPricesMap(Array.from(assets)),
+    );
+
+    if (arrastrados.length > 0) {
+      this.logger.warn(
+        `Snapshot diario de ${userIdStr}: sin cotización para ` +
+          `[${arrastrados.join(', ')}], se arrastra el último precio bueno`,
+      );
+    }
 
     // Build exchange balances with USD values
     const exchangeBalances: ExchangeBalance[] = consolidated.byExchange.map((eb) => {
@@ -217,7 +228,19 @@ export class SnapshotsService {
     const assets = consolidated.byAsset.map((b) => b.asset);
 
     // Get prices
-    const pricesMap = await this.pricesService.getPricesMap(assets);
+    const { precios: pricesMap, arrastrados, perdidos } =
+      await this.reponerPreciosCaidos(
+        userIdStr,
+        consolidated.byAsset,
+        await this.pricesService.getPricesMap(assets),
+      );
+
+    if (arrastrados.length > 0) {
+      this.logger.warn(
+        `Snapshot horario de ${userIdStr}: sin cotización para ` +
+          `[${arrastrados.join(', ')}], se arrastra el último precio bueno`,
+      );
+    }
 
     // Calculate all asset balances with USD values
     const assetBalances: SnapshotAssetBalance[] = consolidated.byAsset.map((b) => ({
@@ -244,15 +267,22 @@ export class SnapshotsService {
     // dejaría la serie vacía para siempre. Lo que descalifica al punto es que el
     // fallo SE NOTE en el total, así que se pide además una caída brusca contra
     // la última lectura buena.
+    //
+    // Un precio que no llegó y no se pudo reponer cuenta como el mismo tipo de
+    // fallo: el saldo está, pero no se sabe cuánto vale.
     const failedExchanges = consolidated.failedExchanges ?? [];
+    const huboFallo = failedExchanges.length > 0 || perdidos.length > 0;
     const isPartial =
-      failedExchanges.length > 0 &&
+      huboFallo &&
       (await this.dropsAgainstLastGoodSnapshot(userIdStr, totalValueUsd));
 
     if (isPartial) {
+      const causa = failedExchanges.length
+        ? `no contestaron [${failedExchanges.join(', ')}]`
+        : `sin precio para [${perdidos.join(', ')}]`;
       this.logger.warn(
-        `Snapshot horario de ${userIdStr} marcado como parcial: no contestaron ` +
-          `[${failedExchanges.join(', ')}] y el total cayó a ${Math.round(totalValueUsd)}`,
+        `Snapshot horario de ${userIdStr} marcado como parcial: ${causa} ` +
+          `y el total cayó a ${Math.round(totalValueUsd)}`,
       );
     }
 
@@ -264,6 +294,7 @@ export class SnapshotsService {
       assetBalances,
       isPartial,
       missingExchanges: failedExchanges.length ? failedExchanges : undefined,
+      stalePriceAssets: arrastrados.length ? arrastrados : undefined,
     });
 
     return snapshot.save();
@@ -272,6 +303,73 @@ export class SnapshotsService {
   /** Umbral de caída horaria que, junto con un exchange caído, delata una
    *  lectura incompleta. Una cartera no pierde esto en una hora por mercado. */
   private static readonly PARTIAL_DROP_RATIO = 0.1;
+
+  /** Hasta acá se considera vigente el último precio conocido de un activo. */
+  private static readonly ARRASTRE_PRECIO_MS = 6 * 60 * 60 * 1000;
+
+  /**
+   * `getPricesMap` devuelve 0 con dos significados que el snapshot no puede
+   * distinguir: "esto no cotiza" (el polvo de PIXEL, de W, de BABY) y "no pude
+   * consultarlo". El 03/09/2026 a las 02:00 UTC pasó lo segundo con NEXO: el
+   * saldo estaba entero —25.457,94— y el precio vino en cero, así que el punto
+   * quedó en 83.839 contra 104.889 reales. Un desplome de 21 mil dólares que
+   * nunca ocurrió.
+   *
+   * La última lectura buena sí sabe distinguirlos: si el activo tenía precio
+   * hace una hora, el cero de ahora es un agujero. Se tapa con ese precio, que
+   * envejece pero no miente; valuar 25 mil NEXO en cero sí.
+   *
+   * Lo que no se puede reponer se devuelve aparte: es la prueba de que la
+   * lectura vino incompleta, el mismo papel que juega un exchange que no
+   * contesta.
+   */
+  private async reponerPreciosCaidos(
+    userId: string,
+    saldos: { asset: string; total: number }[],
+    precios: Record<string, number>,
+  ): Promise<{
+    precios: Record<string, number>;
+    arrastrados: string[];
+    perdidos: string[];
+  }> {
+    const sinPrecio = saldos.filter((b) => b.total > 0 && !(precios[b.asset] > 0));
+    if (sinPrecio.length === 0) {
+      return { precios, arrastrados: [], perdidos: [] };
+    }
+
+    const ultimoBueno = await this.hourlySnapshotModel
+      .findOne({ userId: new Types.ObjectId(userId), isPartial: { $ne: true } })
+      .sort({ timestamp: -1 })
+      .select('timestamp assetBalances')
+      .lean();
+
+    // Sin lectura previa no hay con qué distinguir un agujero de un cero real.
+    if (!ultimoBueno?.assetBalances?.length) {
+      return { precios, arrastrados: [], perdidos: [] };
+    }
+
+    const antiguedad = Date.now() - new Date(ultimoBueno.timestamp).getTime();
+    const vigente = antiguedad <= SnapshotsService.ARRASTRE_PRECIO_MS;
+
+    const repuestos = { ...precios };
+    const arrastrados: string[] = [];
+    const perdidos: string[] = [];
+
+    for (const saldo of sinPrecio) {
+      const previo =
+        ultimoBueno.assetBalances.find((a) => a.asset === saldo.asset)?.priceUsd ?? 0;
+      if (previo <= 0) continue; // nunca cotizó: el cero es la respuesta correcta
+
+      if (vigente) {
+        repuestos[saldo.asset] = previo;
+        arrastrados.push(saldo.asset);
+      } else {
+        perdidos.push(saldo.asset);
+      }
+    }
+
+    return { precios: repuestos, arrastrados, perdidos };
+  }
 
   /**
    * ¿El total cae bruscamente contra el último snapshot que sí fue completo?

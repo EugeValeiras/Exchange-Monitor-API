@@ -55,6 +55,13 @@ export class HourlySnapshot {
   @Prop({ type: [String], default: undefined })
   missingExchanges?: string[];
 
+  /**
+   * Activos cuyo precio no llegó y se valuaron con el último precio conocido.
+   * El total es bueno; la cotización de estos activos tiene hasta una hora.
+   */
+  @Prop({ type: [String], default: undefined })
+  stalePriceAssets?: string[];
+
   @Prop({ type: [TopAssetSchema], default: [] })
   topAssets: TopAsset[];
 
