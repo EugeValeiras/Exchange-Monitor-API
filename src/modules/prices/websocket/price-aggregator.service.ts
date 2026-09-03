@@ -7,11 +7,23 @@ import { NexoStreamService } from './nexo-stream.service';
 import { PriceUpdate, AggregatedPrice } from './exchange-stream.interface';
 import { SettingsService } from '../../settings/settings.service';
 
+export interface ConnectionStatus {
+  binance: boolean;
+  binanceFutures: boolean;
+  kraken: boolean;
+  /** Pares configurados por exchange: de quién se ESPERAN precios. */
+  configured: { binance: number; binanceFutures: number; kraken: number };
+}
+
 @Injectable()
 export class PriceAggregatorService implements OnModuleInit {
   private readonly logger = new Logger(PriceAggregatorService.name);
   private priceCache = new Map<string, AggregatedPrice>();
   private currentSymbols: Set<string> = new Set();
+
+  /** Lo último que se suscribió, por exchange. Es lo que responde a
+   *  "¿de quién esperamos precios?": de quien tenga pares acá. */
+  private configuredByExchange: Record<string, string[]> = {};
 
   // Default symbols to subscribe on startup (fallback)
   private readonly defaultSymbols = [
@@ -121,6 +133,7 @@ export class PriceAggregatorService implements OnModuleInit {
       allSymbols.push(...symbols);
     });
     this.currentSymbols = new Set(allSymbols);
+    this.configuredByExchange = symbolsByExchange;
 
     this.logger.log(`[Subscribe] Total symbols: ${allSymbols.length}`);
 
@@ -156,6 +169,9 @@ export class PriceAggregatorService implements OnModuleInit {
     this.subscribeToSymbolsInternal(symbolsByExchange);
     const total = Object.values(symbolsByExchange).reduce((acc, s) => acc + s.length, 0);
     this.logger.log(`Refreshed subscriptions with ${total} total symbols`);
+    // Los clientes conectados tienen que enterarse de que cambió lo que se
+    // espera de cada exchange, no sólo los que se conecten después.
+    this.eventEmitter.emit('prices.subscriptions.updated', this.getConnectionStatus());
   }
 
   private handlePriceUpdate(update: PriceUpdate): void {
@@ -263,11 +279,23 @@ export class PriceAggregatorService implements OnModuleInit {
     this.logger.debug(`Client requested symbols (already configured): ${configuredSymbols.join(', ')}`);
   }
 
-  getConnectionStatus(): { binance: boolean; binanceFutures: boolean; kraken: boolean } {
+  /**
+   * Conectado o no, y cuántos pares tiene configurados cada exchange. Las dos
+   * cosas juntas son lo que permite distinguir "Kraken está caído" de "Kraken
+   * no tiene nada que mandar": sin la segunda, la app acusaba de silencio a
+   * exchanges de los que nunca hubo que esperar precios.
+   */
+  getConnectionStatus(): ConnectionStatus {
+    const binance = this.configuredByExchange['binance'] ?? [];
     return {
       binance: this.binanceStream.isConnected(),
       binanceFutures: this.binanceFuturesStream.isConnected(),
       kraken: this.krakenStream.isConnected(),
+      configured: {
+        binance: binance.filter((s) => !s.includes(':USDT')).length,
+        binanceFutures: binance.filter((s) => s.includes(':USDT')).length,
+        kraken: (this.configuredByExchange['kraken'] ?? []).length,
+      },
     };
   }
 }

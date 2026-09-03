@@ -11,7 +11,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger, Optional, Inject, forwardRef } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { PriceAggregatorService } from './price-aggregator.service';
+import { ConnectionStatus, PriceAggregatorService } from './price-aggregator.service';
 import { AggregatedPrice } from './exchange-stream.interface';
 import { SettingsService } from '../../settings/settings.service';
 
@@ -92,6 +92,11 @@ export class PricesGateway
   @OnEvent('settings.symbols.updated')
   async handleSymbolsUpdated(): Promise<void> {
     await this.loadConfiguredSymbols();
+  }
+
+  @OnEvent('prices.subscriptions.updated')
+  broadcastConnectionStatus(status: ConnectionStatus): void {
+    this.server.emit('connection:status', status);
   }
 
   afterInit(): void {
