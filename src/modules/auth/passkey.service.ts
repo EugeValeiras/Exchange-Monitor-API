@@ -318,6 +318,7 @@ export class PasskeyService {
       id: string;
       deviceName: string;
       provider: string | null;
+      providerId: string | null;
       createdAt: Date;
       lastUsedAt?: Date;
     }>;
@@ -331,7 +332,8 @@ export class PasskeyService {
         // Null cuando el autenticador no declaró su AAGUID o no la conocemos.
         // Las credenciales registradas antes de guardarla también dan null:
         // el dato no estaba, y no se puede deducir después.
-        provider: proveedorDePasskey(p.aaguid),
+        provider: proveedorDePasskey(p.aaguid)?.nombre ?? null,
+        providerId: proveedorDePasskey(p.aaguid)?.id ?? null,
         createdAt: p.createdAt,
         lastUsedAt: p.lastUsedAt,
       })),

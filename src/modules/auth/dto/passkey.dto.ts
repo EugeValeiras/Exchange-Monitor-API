@@ -70,6 +70,14 @@ export class PasskeyListItemDto {
   })
   provider?: string | null;
 
+  @ApiProperty({
+    required: false,
+    nullable: true,
+    example: 'google',
+    description: 'Slug del proveedor, para elegir el ícono.',
+  })
+  providerId?: string | null;
+
   @ApiProperty({ description: 'Credential ID' })
   id: string;
 

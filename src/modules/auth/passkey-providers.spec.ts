@@ -2,20 +2,23 @@ import { proveedorDePasskey } from './passkey-providers';
 
 describe('proveedorDePasskey · quién guarda la llave', () => {
   it('reconoce los proveedores conocidos', () => {
-    expect(proveedorDePasskey('fbfc3007-154e-4ecc-8c0b-6e020557d7bd')).toBe(
-      'Llavero de iCloud',
-    );
-    expect(proveedorDePasskey('ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4')).toBe(
-      'Gestor de Google',
-    );
-    expect(proveedorDePasskey('bada5566-a7aa-401f-bd96-45619a55120d')).toBe(
-      '1Password',
-    );
+    expect(proveedorDePasskey('fbfc3007-154e-4ecc-8c0b-6e020557d7bd')).toEqual({
+      id: 'apple',
+      nombre: 'Llavero de iCloud',
+    });
+    expect(proveedorDePasskey('ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4')).toEqual({
+      id: 'google',
+      nombre: 'Gestor de Google',
+    });
+    expect(proveedorDePasskey('bada5566-a7aa-401f-bd96-45619a55120d')).toEqual({
+      id: '1password',
+      nombre: '1Password',
+    });
   });
 
   it('no se pierde por mayúsculas', () => {
-    expect(proveedorDePasskey('FBFC3007-154E-4ECC-8C0B-6E020557D7BD')).toBe(
-      'Llavero de iCloud',
+    expect(proveedorDePasskey('FBFC3007-154E-4ECC-8C0B-6E020557D7BD')?.id).toBe(
+      'apple',
     );
   });
 
