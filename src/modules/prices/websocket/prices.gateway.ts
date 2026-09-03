@@ -49,7 +49,6 @@ export class PricesGateway
     private readonly settingsService?: SettingsService,
   ) {
     this.loadConfiguredSymbols();
-    this.depthStream.onUpdate((book) => this.relayOrderbook(book));
   }
 
   private async loadConfiguredSymbols(): Promise<void> {
@@ -111,6 +110,10 @@ export class PricesGateway
 
   afterInit(): void {
     this.logger.log('Prices WebSocket Gateway initialized');
+    // Acá y no en el constructor: sólo la instancia que Nest cablea al
+    // servidor pasa por afterInit. Registrarlo antes dejaba el callback en una
+    // instancia con `server` en null, y el relay reventaba.
+    this.depthStream.onUpdate((book) => this.relayOrderbook(book));
   }
 
   handleConnection(client: Socket): void {
@@ -195,7 +198,11 @@ export class PricesGateway
     const emit = () => {
       this.orderbookLastSent.set(key, Date.now());
       this.orderbookPending.delete(key);
-      this.server.to(`orderbook:${key}`).emit('orderbook:update', {
+      // Corre en un timer: una excepción acá no tiene quién la atrape y
+      // mataría el proceso entero. Nunca.
+      try {
+        if (!this.server) return;
+        this.server.to(`orderbook:${key}`).emit('orderbook:update', {
         exchange: book.exchange,
         symbol: book.symbol,
         timestamp: book.timestamp.toISOString(),
@@ -205,6 +212,9 @@ export class PricesGateway
         asks: book.asks,
         source: 'stream',
       });
+      } catch (error) {
+        this.logger.error(`No pude reenviar el libro de ${key}: ${(error as Error).message}`);
+      }
     };
 
     if (wait <= 0) {
