@@ -14,6 +14,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { ConnectionStatus, PriceAggregatorService } from './price-aggregator.service';
 import { AggregatedPrice } from './exchange-stream.interface';
 import { SettingsService } from '../../settings/settings.service';
+import { BinanceDepthStreamService, DepthUpdate } from './binance-depth-stream.service';
 
 @WebSocketGateway({
   cors: {
@@ -34,12 +35,21 @@ export class PricesGateway
   private configuredByBase: Map<string, string[]> = new Map();
   private configuredToRequested: Map<string, Set<string>> = new Map();
 
+  /** Qué libros mira cada cliente, para soltarlos cuando se desconecta. */
+  private readonly orderbookViewers = new Map<string, Set<string>>();
+  /** Última emisión por libro: Binance manda diez por segundo, se pasan cuatro. */
+  private readonly orderbookLastSent = new Map<string, number>();
+  private readonly orderbookPending = new Map<string, NodeJS.Timeout>();
+  private static readonly ORDERBOOK_MIN_INTERVAL_MS = 250;
+
   constructor(
     private readonly priceAggregator: PriceAggregatorService,
+    private readonly depthStream: BinanceDepthStreamService,
     @Optional() @Inject(forwardRef(() => SettingsService))
     private readonly settingsService?: SettingsService,
   ) {
     this.loadConfiguredSymbols();
+    this.depthStream.onUpdate((book) => this.relayOrderbook(book));
   }
 
   private async loadConfiguredSymbols(): Promise<void> {
@@ -116,6 +126,95 @@ export class PricesGateway
 
   handleDisconnect(client: Socket): void {
     this.logger.log(`Client disconnected: ${client.id}`);
+    for (const key of this.orderbookViewers.get(client.id) ?? []) {
+      this.releaseOrderbook(client, key);
+    }
+    this.orderbookViewers.delete(client.id);
+  }
+
+  // ==================== LIBRO DE ÓRDENES EN VIVO ====================
+
+  /**
+   * Un cliente quiere ver la profundidad de un par. Sólo Binance la emite por
+   * WebSocket; para el resto se le avisa y el cliente sigue por REST.
+   */
+  @SubscribeMessage('orderbook:subscribe')
+  handleOrderbookSubscribe(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { exchange?: string; symbol?: string },
+  ): void {
+    const exchange = (body?.exchange ?? '').toLowerCase();
+    const symbol = (body?.symbol ?? '').toUpperCase();
+    if (!symbol) return;
+
+    if (exchange !== 'binance') {
+      client.emit('orderbook:unsupported', {
+        exchange,
+        symbol,
+        reason: `${exchange} no emite profundidad en vivo; se sigue por REST`,
+      });
+      return;
+    }
+
+    const key = `${exchange}:${symbol}`;
+    const mine = this.orderbookViewers.get(client.id) ?? new Set<string>();
+    if (mine.has(key)) return;
+    mine.add(key);
+    this.orderbookViewers.set(client.id, mine);
+
+    client.join(`orderbook:${key}`);
+    this.depthStream.subscribe(symbol);
+    this.logger.log(`Client ${client.id} mira el libro de ${key}`);
+  }
+
+  @SubscribeMessage('orderbook:unsubscribe')
+  handleOrderbookUnsubscribe(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { exchange?: string; symbol?: string },
+  ): void {
+    const key = `${(body?.exchange ?? '').toLowerCase()}:${(body?.symbol ?? '').toUpperCase()}`;
+    const mine = this.orderbookViewers.get(client.id);
+    if (!mine?.has(key)) return;
+    mine.delete(key);
+    this.releaseOrderbook(client, key);
+  }
+
+  private releaseOrderbook(client: Socket, key: string): void {
+    client.leave(`orderbook:${key}`);
+    const [exchange, symbol] = key.split(':');
+    if (exchange === 'binance') this.depthStream.unsubscribe(symbol);
+  }
+
+  /** Reenvía un libro a su sala, a lo sumo cuatro veces por segundo. */
+  private relayOrderbook(book: DepthUpdate): void {
+    const key = `${book.exchange}:${book.symbol}`;
+    const now = Date.now();
+    const last = this.orderbookLastSent.get(key) ?? 0;
+    const wait = PricesGateway.ORDERBOOK_MIN_INTERVAL_MS - (now - last);
+
+    const emit = () => {
+      this.orderbookLastSent.set(key, Date.now());
+      this.orderbookPending.delete(key);
+      this.server.to(`orderbook:${key}`).emit('orderbook:update', {
+        exchange: book.exchange,
+        symbol: book.symbol,
+        timestamp: book.timestamp.toISOString(),
+        datetime: book.timestamp.toISOString(),
+        nonce: null,
+        bids: book.bids,
+        asks: book.asks,
+        source: 'stream',
+      });
+    };
+
+    if (wait <= 0) {
+      emit();
+      return;
+    }
+    // Ya hay uno programado: el más nuevo reemplaza al anterior, no se suma.
+    const pending = this.orderbookPending.get(key);
+    if (pending) clearTimeout(pending);
+    this.orderbookPending.set(key, setTimeout(emit, wait));
   }
 
   @SubscribeMessage('subscribe')

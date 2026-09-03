@@ -11,6 +11,7 @@ import { PriceAggregatorService } from './websocket/price-aggregator.service';
 import { BinanceStreamService } from './websocket/binance-stream.service';
 import { BinanceFuturesStreamService } from './websocket/binance-futures-stream.service';
 import { KrakenStreamService } from './websocket/kraken-stream.service';
+import { BinanceDepthStreamService } from './websocket/binance-depth-stream.service';
 import { NexoStreamService } from './websocket/nexo-stream.service';
 import { ExchangeCredentialsModule } from '../exchange-credentials/exchange-credentials.module';
 import { SettingsModule } from '../settings/settings.module';
@@ -40,6 +41,7 @@ import {
     BinanceStreamService,
     BinanceFuturesStreamService,
     KrakenStreamService,
+    BinanceDepthStreamService,
   ],
   exports: [
     PricesService,
