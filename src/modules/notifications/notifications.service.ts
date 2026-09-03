@@ -3,7 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { UsersService } from '../users/users.service';
 import { FirebaseService } from './firebase.service';
 import { NotificationSettingsDto } from './dto/notification-settings.dto';
-import { alertAssetsFor, wantsAsset } from './alert-assets';
+import { alertPairsFor, wantsSymbol } from './alert-assets';
 
 @Injectable()
 export class NotificationsService {
@@ -101,7 +101,7 @@ export class NotificationsService {
    */
   async getTokensForPriceChange(
     absPercentChange: number,
-    asset: string,
+    symbol: string,
   ): Promise<string[]> {
     const users = await this.usersService.findUsersWithNotificationsEnabled();
     const tokens: string[] = [];
@@ -111,8 +111,8 @@ export class NotificationsService {
       if (!settings?.enabled) continue;
       if (!user.pushTokens?.length) continue;
 
-      // Que el activo esté entre los que eligió seguir.
-      if (!wantsAsset(settings, asset)) continue;
+      // Que el PAR esté entre los que eligió seguir.
+      if (!wantsSymbol(settings, symbol)) continue;
 
       const threshold = settings.priceChangeThreshold ?? 5;
       if (absPercentChange < threshold) continue;
@@ -133,21 +133,21 @@ export class NotificationsService {
    * precio de cada exchange, así que no puede salir a consultar usuarios en
    * cada uno. Si nadie sigue el activo, el tick se descarta sin tocar la base.
    */
-  async getAssetsWithInterest(): Promise<Set<string>> {
+  async getSymbolsWithInterest(pares: readonly string[]): Promise<Set<string>> {
     const users = await this.usersService.findUsersWithNotificationsEnabled();
-    const assets = new Set<string>();
+    const symbols = new Set<string>();
 
     for (const user of users) {
       const settings = user.notificationSettings;
       if (!settings?.enabled) continue;
       if (!user.pushTokens?.length) continue;
 
-      alertAssetsFor(settings).forEach((asset) =>
-        assets.add(asset.toUpperCase()),
+      alertPairsFor(settings, pares).forEach((p) =>
+        symbols.add(p.toUpperCase()),
       );
     }
 
-    return assets;
+    return symbols;
   }
 
   /**
@@ -182,7 +182,8 @@ export class NotificationsService {
       priceChangeThreshold: user.notificationSettings?.priceChangeThreshold ?? 5,
       quietHoursStart: user.notificationSettings?.quietHoursStart,
       quietHoursEnd: user.notificationSettings?.quietHoursEnd,
-      alertAssets: alertAssetsFor(user.notificationSettings) as string[],
+      alertPairs: user.notificationSettings?.alertPairs,
+      alertAssets: user.notificationSettings?.alertAssets,
     };
   }
 
@@ -197,6 +198,8 @@ export class NotificationsService {
     const current = await this.usersService.findById(userId);
     const merged = {
       ...settings,
+      alertPairs:
+        settings.alertPairs ?? current.notificationSettings?.alertPairs,
       alertAssets:
         settings.alertAssets ?? current.notificationSettings?.alertAssets,
     };
@@ -212,7 +215,8 @@ export class NotificationsService {
       priceChangeThreshold: updated.notificationSettings?.priceChangeThreshold ?? 5,
       quietHoursStart: updated.notificationSettings?.quietHoursStart,
       quietHoursEnd: updated.notificationSettings?.quietHoursEnd,
-      alertAssets: alertAssetsFor(updated.notificationSettings) as string[],
+      alertPairs: updated.notificationSettings?.alertPairs,
+      alertAssets: updated.notificationSettings?.alertAssets,
     };
   }
 }

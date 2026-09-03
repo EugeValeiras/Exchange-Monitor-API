@@ -18,7 +18,13 @@ describe('ThresholdAlertService · alertas de precio', () => {
 
   beforeEach(async () => {
     sent = [];
-    seguidos = new Set(['BTC', 'ETH', 'NEXO', 'MON', 'SOL']);
+    seguidos = new Set([
+      'BTC/USDT',
+      'ETH/USDT',
+      'NEXO/USDT',
+      'MON/USDT',
+      'SOL/USDT',
+    ]);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -47,9 +53,9 @@ describe('ThresholdAlertService · alertas de precio', () => {
         {
           provide: NotificationsService,
           useValue: {
-            getAssetsWithInterest: async () => seguidos,
-            getTokensForPriceChange: async (_pct: number, asset: string) =>
-              seguidos.has(asset) ? ['token-1'] : [],
+            getSymbolsWithInterest: async () => seguidos,
+            getTokensForPriceChange: async (_pct: number, symbol: string) =>
+              seguidos.has(symbol.toUpperCase()) ? ['token-1'] : [],
             getEnabledUserTokens: async () => ['token-1'],
           },
         },
@@ -70,13 +76,41 @@ describe('ThresholdAlertService · alertas de precio', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('ignora los pares que no cotizan en dólares', async () => {
+  it('no avisa de un par que no está elegido', async () => {
     await update('NEXO/USDT', 0.83);
     await update('NEXO/BTC', 0.0000106);
     await update('NEXO/USDT', 0.83);
     await update('NEXO/BTC', 0.0000107);
 
-    // Antes, esta secuencia mandaba una alerta por cada update.
+    // NEXO/BTC no está en la selección, así que no llega nada. Antes esta
+    // secuencia mandaba una alerta por cada update, porque el último precio
+    // se llevaba por activo y los dos pares se pisaban.
+    expect(sent).toHaveLength(0);
+  });
+
+  it('un par contra BTC se puede seguir, y el precio va en BTC', async () => {
+    // El motivo del cambio: antes era imposible porque el aviso salía con
+    // formato de dólares y "$0.00" no dice nada.
+    seguidos.add('NEXO/BTC');
+    service.invalidateInterestCache();
+
+    await update('NEXO/BTC', 0.0000106);
+    await update('NEXO/BTC', 0.0000120); // +13 %
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].title).toContain('NEXO/BTC');
+    expect(sent[0].body).toContain('BTC');
+    expect(sent[0].body).not.toContain('$');
+  });
+
+  it('seguir un par no arrastra al otro del mismo activo', async () => {
+    seguidos.add('NEXO/BTC');
+    seguidos.delete('NEXO/USDT');
+    service.invalidateInterestCache();
+
+    await update('NEXO/USDT', 0.80);
+    await update('NEXO/USDT', 0.95);
+
     expect(sent).toHaveLength(0);
   });
 
@@ -103,10 +137,10 @@ describe('ThresholdAlertService · alertas de precio', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('sí alerta por un activo que el usuario agregó a su selección', async () => {
-    // Antes esto era imposible: la lista de activos era una tabla escrita a
-    // mano en el código y DOGE no estaba.
-    seguidos.add('DOGE');
+  it('sí alerta por un par que el usuario agregó a su selección', async () => {
+    // Antes esto era imposible: la lista era una tabla escrita a mano en el
+    // código y DOGE no estaba.
+    seguidos.add('DOGE/USDT');
     service.invalidateInterestCache();
 
     await update('DOGE/USDT', 0.10);
@@ -116,10 +150,10 @@ describe('ThresholdAlertService · alertas de precio', () => {
     expect(sent[0].body).toContain('DOGE');
   });
 
-  it('deja de alertar en cuanto se destilda el activo', async () => {
+  it('deja de alertar en cuanto se destilda el par', async () => {
     await update('NEXO/USDT', 0.80);
 
-    seguidos.delete('NEXO');
+    seguidos.delete('NEXO/USDT');
     service.invalidateInterestCache();
 
     await update('NEXO/USDT', 0.90); // movimiento de sobra, pero ya no interesa
@@ -131,7 +165,7 @@ describe('ThresholdAlertService · alertas de precio', () => {
     // Sin la invalidación por evento habría que esperar el TTL, y destildar un
     // activo parecería no hacer nada.
     await update('SOL/USDT', 100);
-    seguidos.delete('SOL');
+    seguidos.delete('SOL/USDT');
     service.invalidateInterestCache();
     await update('SOL/USDT', 150);
 

@@ -151,6 +151,7 @@ export class UsersService {
       priceChangeThreshold: number;
       quietHoursStart?: string;
       quietHoursEnd?: string;
+      alertPairs?: string[];
       alertAssets?: string[];
     },
   ): Promise<UserDocument> {

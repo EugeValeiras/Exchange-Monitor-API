@@ -51,10 +51,15 @@ export class User {
     priceChangeThreshold: number;
     quietHoursStart?: string;
     quietHoursEnd?: string;
-    /// Activos que generan aviso. Ausente (no configurado) significa el
-    /// conjunto por defecto, para no cambiarle el comportamiento a quien
-    /// nunca entró a elegir. Vacío significa "ninguno", que es una elección
-    /// legítima y distinta de no haber elegido.
+    /// Pares que generan aviso: "NEXO/USDT", "NEXO/BTC". Es la unidad
+    /// correcta porque un activo cotiza contra varias monedas y no valen lo
+    /// mismo. Ausente significa "nunca eligió pares" y se traduce desde
+    /// alertAssets; vacío es una elección legítima —no quiero nada— y se
+    /// respeta.
+    alertPairs?: string[];
+
+    /// Selección vieja, por activo. Se conserva para traducir la preferencia
+    /// de quien todavía no eligió pares (la app publicada manda esto).
     alertAssets?: string[];
   };
 

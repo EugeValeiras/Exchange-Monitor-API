@@ -1,52 +1,103 @@
 import {
   DEFAULT_ALERT_ASSETS,
-  alertAssetsFor,
+  alertPairsFor,
   formatAlertPrice,
-  wantsAsset,
+  isDollarQuote,
+  splitSymbol,
+  wantsSymbol,
 } from './alert-assets';
 
 describe('alert-assets · qué se avisa y cómo se escribe', () => {
-  describe('selección', () => {
-    it('quien nunca eligió sigue recibiendo lo de siempre', () => {
-      expect(alertAssetsFor(undefined)).toEqual(DEFAULT_ALERT_ASSETS);
-      expect(alertAssetsFor({})).toEqual(DEFAULT_ALERT_ASSETS);
+  describe('selección por par', () => {
+    it('un par elegido avisa aunque no cotice en dólares', () => {
+      // El motivo del cambio: NEXO/BTC era imposible de seguir porque el
+      // filtro de "sólo contra dólar" existía para que no llegara con
+      // formato de dólares.
+      const s = { alertPairs: ['NEXO/BTC'] };
+
+      expect(wantsSymbol(s, 'NEXO/BTC')).toBe(true);
+      expect(wantsSymbol(s, 'NEXO/USDT')).toBe(false);
     });
 
-    it('distingue "no elegí" de "no quiero nada"', () => {
-      // Un array vacío es una elección, no una ausencia: si cayera en el
-      // default, destildar todo volvería a encender las alertas.
-      expect(alertAssetsFor({ alertAssets: [] })).toEqual([]);
-      expect(wantsAsset({ alertAssets: [] }, 'BTC')).toBe(false);
-    });
+    it('los dos pares del mismo activo se siguen por separado', () => {
+      const s = { alertPairs: ['NEXO/USDT'] };
 
-    it('respeta la lista elegida', () => {
-      const settings = { alertAssets: ['BTC', 'XRP'] };
-
-      expect(wantsAsset(settings, 'XRP')).toBe(true);
-      expect(wantsAsset(settings, 'ETH')).toBe(false);
+      expect(wantsSymbol(s, 'NEXO/USDT')).toBe(true);
+      expect(wantsSymbol(s, 'NEXO/BTC')).toBe(false);
     });
 
     it('no se pierde por mayúsculas', () => {
-      expect(wantsAsset({ alertAssets: ['BTC'] }, 'btc')).toBe(true);
+      expect(wantsSymbol({ alertPairs: ['nexo/btc'] }, 'NEXO/BTC')).toBe(true);
+    });
+
+    it('vacío es una elección, no una ausencia', () => {
+      expect(wantsSymbol({ alertPairs: [] }, 'BTC/USDT')).toBe(false);
+    });
+  });
+
+  describe('quien todavía no eligió pares', () => {
+    it('mantiene exactamente lo que recibía antes', () => {
+      // La app publicada manda alertAssets. Nadie pidió empezar a recibir
+      // avisos que antes no llegaban, así que la regla vieja sigue en pie:
+      // el activo elegido Y cotizando en dólares.
+      const s = { alertAssets: ['NEXO'] };
+
+      expect(wantsSymbol(s, 'NEXO/USDT')).toBe(true);
+      expect(wantsSymbol(s, 'NEXO/BTC')).toBe(false);
+    });
+
+    it('sin nada configurado, los cinco de siempre', () => {
+      expect(wantsSymbol(undefined, 'BTC/USDT')).toBe(true);
+      expect(wantsSymbol(undefined, 'DOGE/USDT')).toBe(false);
+      expect(DEFAULT_ALERT_ASSETS).toContain('BTC');
+    });
+
+    it('traduce la preferencia vieja a los pares que existen', () => {
+      const pares = ['NEXO/USDT', 'NEXO/BTC', 'BTC/USDT', 'DOGE/USDT'];
+
+      expect(alertPairsFor({ alertAssets: ['NEXO', 'BTC'] }, pares)).toEqual([
+        'NEXO/USDT',
+        'BTC/USDT',
+      ]);
+    });
+
+    it('la lista de pares gana sobre la de activos', () => {
+      const pares = ['NEXO/USDT', 'NEXO/BTC'];
+
+      expect(
+        alertPairsFor({ alertPairs: ['NEXO/BTC'], alertAssets: ['BTC'] }, pares),
+      ).toEqual(['NEXO/BTC']);
     });
   });
 
   describe('formato de precio', () => {
-    // Reproduce lo que hacían los formateadores por activo, que era la razón
-    // por la que sólo cinco activos podían alertar.
-    it('un precio de miles no necesita centavos', () => {
-      expect(formatAlertPrice(64231.77)).toBe('$64,232');
-      expect(formatAlertPrice(3120.5)).toBe('$3,121');
+    it('en dólares lleva el signo pegado', () => {
+      expect(formatAlertPrice(64231.77, 'USDT')).toBe('$64,232');
+      expect(formatAlertPrice(0.83, 'USD')).toBe('$0.83');
     });
 
-    it('un precio corriente lleva dos decimales', () => {
-      expect(formatAlertPrice(150.42)).toBe('$150.42');
-      expect(formatAlertPrice(0.83)).toBe('$0.83');
+    it('contra otra moneda lleva su ticker, no "$"', () => {
+      // Mostrar 0,0000106 BTC como "$0.00" era decir cualquier cosa: ése era
+      // el motivo real de no poder alertar NEXO/BTC.
+      expect(formatAlertPrice(0.0000106, 'BTC')).toBe('0.00001060 BTC');
+      expect(formatAlertPrice(31.24, 'MON')).toBe('31.24 MON');
     });
 
-    it('un precio chico necesita más decimales para decir algo', () => {
-      expect(formatAlertPrice(0.0234)).toBe('$0.0234');
-      expect(formatAlertPrice(0.0000106)).toBe('$0.000011');
+    it('un precio de millonésimas necesita ocho decimales', () => {
+      // Con seis, dos precios distintos de NEXO/BTC se escribían igual.
+      expect(formatAlertPrice(0.00001227, 'BTC')).toBe('0.00001227 BTC');
+      expect(formatAlertPrice(0.00001225, 'BTC')).toBe('0.00001225 BTC');
+    });
+  });
+
+  describe('utilidades', () => {
+    it('parte el símbolo', () => {
+      expect(splitSymbol('NEXO/BTC')).toEqual({ base: 'NEXO', quote: 'BTC' });
+    });
+
+    it('sabe qué monedas son dólares', () => {
+      expect(isDollarQuote('usdt')).toBe(true);
+      expect(isDollarQuote('BTC')).toBe(false);
     });
   });
 });

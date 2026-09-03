@@ -9,7 +9,7 @@ import {
   PriceThresholdDocument,
 } from './schemas/price-threshold.schema';
 import { AggregatedPrice } from '../prices/websocket/exchange-stream.interface';
-import { formatAlertPrice } from './alert-assets';
+import { formatAlertPrice, splitSymbol } from './alert-assets';
 
 @Injectable()
 export class ThresholdAlertService implements OnModuleInit {
@@ -18,11 +18,15 @@ export class ThresholdAlertService implements OnModuleInit {
   // Percentage change required to trigger alert (1% = 0.01)
   private readonly alertPercentage = 0.01;
 
-  /// Activos que le interesan a alguien, cacheados. `handlePriceUpdate` corre
+  /// Pares que le interesan a alguien, cacheados. `handlePriceUpdate` corre
   /// en cada tick de cada exchange: sin este corte iríamos a la base miles de
-  /// veces por minuto para descubrir que a nadie le importa el activo.
-  private interestedAssets: Set<string> | null = null;
-  private interestedAssetsExpiry = 0;
+  /// veces por minuto para descubrir que a nadie le importa el par.
+  private interestedSymbols: Set<string> | null = null;
+
+  /// Todos los pares que vimos pasar. Hace falta para traducir la preferencia
+  /// vieja —elegida por activo— a la lista de pares que existen hoy.
+  private readonly knownSymbols = new Set<string>();
+  private interestedSymbolsExpiry = 0;
   private static readonly INTEREST_TTL_MS = 60_000;
 
   /// Último precio notificado POR PAR. La clave es el símbolo entero
@@ -55,29 +59,31 @@ export class ThresholdAlertService implements OnModuleInit {
   /// parecería que el interruptor no hizo nada.
   @OnEvent('notification.settings.updated')
   invalidateInterestCache(): void {
-    this.interestedAssets = null;
-    this.interestedAssetsExpiry = 0;
+    this.interestedSymbols = null;
+    this.interestedSymbolsExpiry = 0;
   }
 
-  private async getInterestedAssets(): Promise<Set<string>> {
+  private async getInterestedSymbols(): Promise<Set<string>> {
     const now = Date.now();
-    if (this.interestedAssets && now < this.interestedAssetsExpiry) {
-      return this.interestedAssets;
+    if (this.interestedSymbols && now < this.interestedSymbolsExpiry) {
+      return this.interestedSymbols;
     }
 
     try {
-      this.interestedAssets =
-        await this.notificationsService.getAssetsWithInterest();
-      this.interestedAssetsExpiry =
+      this.interestedSymbols =
+        await this.notificationsService.getSymbolsWithInterest([
+          ...this.knownSymbols,
+        ]);
+      this.interestedSymbolsExpiry =
         now + ThresholdAlertService.INTEREST_TTL_MS;
     } catch (error) {
       // Si la base falla, no callamos las alertas para siempre: se reintenta
       // en el próximo tick con lo último que supimos.
-      this.logger.error(`Failed to load alert assets: ${error.message}`);
-      this.interestedAssets = this.interestedAssets ?? new Set<string>();
+      this.logger.error(`Failed to load alert pairs: ${error.message}`);
+      this.interestedSymbols = this.interestedSymbols ?? new Set<string>();
     }
 
-    return this.interestedAssets;
+    return this.interestedSymbols;
   }
 
   private async loadLastPricesFromDb(): Promise<void> {
@@ -106,20 +112,20 @@ export class ThresholdAlertService implements OnModuleInit {
     }
 
     const symbol = priceData.symbol;
-    const [rawAsset, rawQuote] = symbol.split('/');
-    const baseAsset = rawAsset.toUpperCase();
-    const quote = (rawQuote ?? '').toUpperCase();
+    const { base: baseAsset, quote } = splitSymbol(symbol);
     const currentPrice = priceData.price;
 
-    // ¿Le interesa a alguien? Antes esto era una tabla de cinco activos
-    // escrita a mano; ahora sale de lo que cada uno eligió seguir.
-    const interested = await this.getInterestedAssets();
-    if (!interested.has(baseAsset)) {
-      return;
-    }
+    // El catálogo de pares que existen, para poder traducir una preferencia
+    // vieja elegida por activo.
+    this.knownSymbols.add(symbol.toUpperCase());
 
-    // Sólo pares contra dólar: el formato de la alerta lleva "$".
-    if (!ThresholdAlertService.DOLLAR_QUOTES.has(quote)) {
+    // ¿Le interesa a alguien? La unidad es el PAR: NEXO/USDT y NEXO/BTC no
+    // son la misma cosa y ahora se pueden seguir por separado. El filtro de
+    // "sólo contra dólar" que había acá era un parche para que NEXO/BTC no
+    // llegara con formato de dólares; ahora el precio se escribe en su
+    // moneda, así que el par puede elegirse como cualquier otro.
+    const interested = await this.getInterestedSymbols();
+    if (!interested.has(symbol.toUpperCase())) {
       return;
     }
 
@@ -135,7 +141,7 @@ export class ThresholdAlertService implements OnModuleInit {
     if (lastNotifiedPrice === undefined || lastNotifiedPrice <= 0) {
       await this.updateLastNotifiedPrice(symbol, baseAsset, currentPrice);
       this.logger.log(
-        `Initialized price tracking for ${symbol}: ${formatAlertPrice(currentPrice)}`,
+        `Initialized price tracking for ${symbol}: ${formatAlertPrice(currentPrice, quote)}`,
       );
       return;
     }
@@ -149,12 +155,12 @@ export class ThresholdAlertService implements OnModuleInit {
       const changePercent = (percentageChange * 100).toFixed(2);
 
       this.logger.log(
-        `Price alert for ${baseAsset}: ${formatAlertPrice(lastNotifiedPrice)} -> ${formatAlertPrice(currentPrice)} (${direction} ${changePercent}%)`,
+        `Price alert for ${symbol}: ${formatAlertPrice(lastNotifiedPrice, quote)} -> ${formatAlertPrice(currentPrice, quote)} (${direction} ${changePercent}%)`,
       );
 
       // Send alert to all users with push tokens
       await this.sendPriceAlert(
-        baseAsset,
+        symbol,
         currentPrice,
         lastNotifiedPrice,
         direction,
@@ -189,25 +195,32 @@ export class ThresholdAlertService implements OnModuleInit {
   }
 
   private async sendPriceAlert(
-    asset: string,
+    symbol: string,
     currentPrice: number,
     lastPrice: number,
     direction: 'up' | 'down',
     percentageChange: number,
   ): Promise<void> {
+    const { base: asset, quote } = splitSymbol(symbol);
     const arrow = direction === 'up' ? '↑' : '↓';
     const emoji = direction === 'up' ? '📈' : '📉';
     const changePercent = (percentageChange * 100).toFixed(1);
     const sign = direction === 'up' ? '+' : '-';
 
-    const title = `${emoji} ${asset} ${arrow} ${formatAlertPrice(currentPrice)}`;
-    const body = `${asset} ${sign}${changePercent}% (${formatAlertPrice(lastPrice)} → ${formatAlertPrice(currentPrice)})`;
+    // El aviso nombra el PAR, no sólo el activo: "NEXO ↑" no alcanza cuando
+    // podés estar siguiendo NEXO/USDT y NEXO/BTC a la vez, y el precio se
+    // escribe en la moneda contra la que cotiza.
+    const precio = formatAlertPrice(currentPrice, quote);
+    const anterior = formatAlertPrice(lastPrice, quote);
 
-    // Sólo a quienes este movimiento les corresponde: siguen este activo, su
+    const title = `${emoji} ${symbol} ${arrow} ${precio}`;
+    const body = `${symbol} ${sign}${changePercent}% (${anterior} → ${precio})`;
+
+    // Sólo a quienes este movimiento les corresponde: siguen este par, su
     // umbral lo cubre y no están en su franja de silencio.
     const allTokens = await this.notificationsService.getTokensForPriceChange(
       percentageChange * 100,
-      asset,
+      symbol,
     );
 
     if (allTokens.length === 0) {
@@ -218,7 +231,7 @@ export class ThresholdAlertService implements OnModuleInit {
     }
 
     this.logger.log(
-      `Sending price alert for ${asset} to ${allTokens.length} tokens`,
+      `Sending price alert for ${symbol} to ${allTokens.length} tokens`,
     );
 
     const result = await this.firebaseService.sendMulticastNotification(
@@ -228,6 +241,7 @@ export class ThresholdAlertService implements OnModuleInit {
       {
         type: 'price_alert',
         asset,
+        symbol,
         price: currentPrice.toString(),
         lastPrice: lastPrice.toString(),
         direction,

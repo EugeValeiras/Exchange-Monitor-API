@@ -1,16 +1,30 @@
 /**
- * Qué activos generan aviso, y cómo se escribe su precio.
+ * Qué avisa, y cómo se escribe un precio.
  *
- * Esto vivía como un Map hardcodeado dentro del servicio de alertas: cinco
- * activos elegidos a mano, cada uno con su formateador. Tenía dos problemas.
- * Uno, no había forma de avisar por algo que no estuviera en esa lista aunque
- * lo tuvieras en cartera. Dos, avisaba por cosas que quizá no tenías.
+ * Esto empezó como un Map de cinco activos escrito a mano, pasó a una
+ * selección de activos, y ahora la unidad es el PAR. El motivo es concreto:
+ * un activo puede cotizar contra varias monedas y no son la misma cosa —NEXO
+ * vale 0,83 USDT y 0,0000106 BTC—, así que "avisame de NEXO" no alcanza para
+ * decir qué querés mirar.
  */
 
 /**
- * Lo que alertaba antes de que la selección fuera configurable. Se usa cuando
- * el usuario nunca eligió: cambiarle el comportamiento por haber agregado la
- * función sería peor que dejarlo como estaba.
+ * Monedas de cotización que se muestran con "$". Las demás se escriben con su
+ * ticker al lado, porque un precio en BTC mostrado como "$0.00" no dice nada.
+ */
+const DOLLAR_QUOTES = new Set([
+  'USD',
+  'USDT',
+  'USDC',
+  'BUSD',
+  'DAI',
+  'TUSD',
+  'USDP',
+]);
+
+/**
+ * Los activos que alertaban antes de que hubiera selección. Se usan sólo para
+ * traducir la preferencia vieja de quien nunca eligió pares.
  */
 export const DEFAULT_ALERT_ASSETS: readonly string[] = [
   'BTC',
@@ -20,39 +34,76 @@ export const DEFAULT_ALERT_ASSETS: readonly string[] = [
   'SOL',
 ];
 
-/**
- * Los activos que este usuario quiere que le avisen. `undefined` es "nunca
- * eligió" y cae en el default; `[]` es una elección explícita de no recibir
- * nada, y hay que respetarla.
- */
-export function alertAssetsFor(settings?: {
+export interface AlertSettings {
+  alertPairs?: string[];
   alertAssets?: string[];
-}): readonly string[] {
-  return settings?.alertAssets ?? DEFAULT_ALERT_ASSETS;
 }
 
-/** ¿Este usuario quiere que le avisen de este activo? */
-export function wantsAsset(
-  settings: { alertAssets?: string[] } | undefined,
-  asset: string,
-): boolean {
-  return alertAssetsFor(settings).includes(asset.toUpperCase());
+export function isDollarQuote(quote: string): boolean {
+  return DOLLAR_QUOTES.has(quote.toUpperCase());
+}
+
+/** `NEXO/BTC` → `{ base: 'NEXO', quote: 'BTC' }`. */
+export function splitSymbol(symbol: string): { base: string; quote: string } {
+  const [rawBase, rawQuote] = symbol.split('/');
+  return {
+    base: (rawBase ?? '').toUpperCase(),
+    quote: (rawQuote ?? '').toUpperCase(),
+  };
 }
 
 /**
- * Decimales según la magnitud del precio, en vez de una tabla por activo.
+ * ¿Este usuario quiere que le avisen de este par?
  *
- * Reproduce lo que hacían los formateadores escritos a mano —BTC y ETH sin
- * decimales, NEXO y SOL con dos, MON con cuatro— pero se lo banca cualquier
- * activo, que es lo que permite abrir la selección más allá de los cinco de
- * antes. Un precio de cuatro cifras no necesita centavos y uno de milésimas no
- * se puede mostrar sin ellas.
+ * Con `alertPairs` la respuesta es literal: el par está elegido o no, sin
+ * importar contra qué cotice. Es lo que permite seguir NEXO/BTC.
+ *
+ * Sin `alertPairs` se traduce la preferencia vieja: el activo tenía que estar
+ * entre los elegidos Y cotizar en dólares. Esa segunda condición era el
+ * arreglo del spam de NEXO/BTC, y sigue valiendo para quien no eligió pares:
+ * nadie pidió empezar a recibir avisos que antes no llegaban.
  */
-export function formatAlertPrice(price: number): string {
-  if (price >= 1000) {
-    return `$${price.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+export function wantsSymbol(
+  settings: AlertSettings | undefined,
+  symbol: string,
+): boolean {
+  const { base, quote } = splitSymbol(symbol);
+
+  if (settings?.alertPairs) {
+    return settings.alertPairs.some((p) => p.toUpperCase() === symbol.toUpperCase());
   }
-  if (price >= 0.1) return `$${price.toFixed(2)}`;
-  if (price >= 0.001) return `$${price.toFixed(4)}`;
-  return `$${price.toFixed(6)}`;
+
+  const assets = settings?.alertAssets ?? DEFAULT_ALERT_ASSETS;
+  return assets.includes(base) && isDollarQuote(quote);
+}
+
+/** Los pares que le interesan a este usuario, ya resueltos. */
+export function alertPairsFor(
+  settings: AlertSettings | undefined,
+  pares: readonly string[],
+): string[] {
+  if (settings?.alertPairs) {
+    return [...settings.alertPairs];
+  }
+  return pares.filter((p) => wantsSymbol(settings, p));
+}
+
+/**
+ * El precio, escrito en la moneda en la que cotiza.
+ *
+ * Los decimales salen de la magnitud y no de una tabla por activo: un precio
+ * de miles no necesita centavos y uno de millonésimas —que es lo que pasa
+ * apenas la cotización es contra BTC— no se puede escribir sin ocho.
+ */
+export function formatAlertPrice(price: number, quote = 'USD'): string {
+  const q = quote.toUpperCase();
+  const decimales =
+    price >= 1000 ? 0 : price >= 0.1 ? 2 : price >= 0.001 ? 4 : 8;
+
+  const numero =
+    decimales === 0
+      ? price.toLocaleString('en-US', { maximumFractionDigits: 0 })
+      : price.toFixed(decimales);
+
+  return isDollarQuote(q) ? `$${numero}` : `${numero} ${q}`;
 }

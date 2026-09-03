@@ -25,8 +25,14 @@ export class NotificationSettingsDto {
   @IsString()
   quietHoursEnd?: string;
 
-  /// Activos que generan aviso. Omitirlo deja la selección como estaba; un
-  /// array vacío es "no me avises de nada".
+  /// Pares que generan aviso ("NEXO/BTC"). Omitirlo deja la selección como
+  /// estaba; un array vacío es "no me avises de nada".
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  alertPairs?: string[];
+
+  /// Selección vieja por activo, que sigue mandando la app publicada.
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
@@ -38,5 +44,6 @@ export class NotificationSettingsResponseDto {
   priceChangeThreshold: number;
   quietHoursStart?: string;
   quietHoursEnd?: string;
+  alertPairs?: string[];
   alertAssets?: string[];
 }
