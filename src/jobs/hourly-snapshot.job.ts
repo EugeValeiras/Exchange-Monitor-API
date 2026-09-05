@@ -20,7 +20,22 @@ export class HourlySnapshotJob {
     return globalEnabled && jobEnabled;
   }
 
-  @Cron(CronExpression.EVERY_HOUR, {
+  /**
+   * Cada diez minutos, no cada hora.
+   *
+   * El snapshot no consulta los exchanges: lee el cache de saldos y dispara un
+   * refresco en segundo plano. Lo que sí es fresco es el precio, que sale del
+   * WebSocket — así que el valor cambia de verdad entre una toma y la
+   * siguiente, y la curva de 24 h pasa de 24 puntos a 144.
+   *
+   * Efecto lateral bueno: como cada toma refresca el cache, las cantidades
+   * pasan de estar hasta una hora viejas a diez minutos.
+   *
+   * El nombre "hourly" se queda: la colección, el TTL y las consultas lo usan,
+   * y renombrar todo eso para ganar exactitud en una palabra no vale una
+   * migración.
+   */
+  @Cron('*/10 * * * *', {
     name: 'hourly-snapshot',
     timeZone: 'UTC',
   })

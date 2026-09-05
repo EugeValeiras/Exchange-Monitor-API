@@ -454,13 +454,10 @@ export class SnapshotsService {
         ? new Date(Date.now() - 24 * 60 * 60 * 1000)
         : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    const rawSnapshots = await this.hourlySnapshotModel
-      .find({
-        userId: new Types.ObjectId(userId),
-        timestamp: { $gte: since },
-        isPartial: { $ne: true },
-      })
-      .sort({ timestamp: 1 });
+    // En 7 días se agrega por hora, como el gráfico del total. Acá pesa más:
+    // cada documento trae el detalle de sus 18 activos, así que traerlos todos
+    // serían 1.008 documentos para construir 18 series de 1.008 puntos.
+    const rawSnapshots = await this.leerSnapshots(userId, since, timeframe === '7d');
 
     // Collect all available assets from snapshots (before aggregation)
     const allAssets = new Set<string>();
@@ -528,25 +525,66 @@ export class SnapshotsService {
     return this.buildChartResponse(data, '24h');
   }
 
+  /**
+   * Siete días, un punto por hora.
+   *
+   * Desde que las tomas son cada diez minutos, traer todo serían 1.008 puntos
+   * para un gráfico de unos 300 píxeles: seis veces más datos por pixeles que
+   * no existen. Se agrega en Mongo, que es donde están los documentos, y no en
+   * Node después de traerlos.
+   *
+   * De cada hora se toma la ÚLTIMA lectura, no el promedio: un punto del
+   * gráfico tiene que ser un instante que existió: promediar seis tomas da un
+   * valor que la cartera nunca tuvo.
+   */
+  /**
+   * Las tomas del período, agregadas por hora si se pide.
+   *
+   * De cada hora se queda la ÚLTIMA: un punto del gráfico tiene que ser un
+   * instante que existió, y promediar seis tomas da un valor que la cartera
+   * nunca tuvo.
+   */
+  private async leerSnapshots(
+    userId: string,
+    since: Date,
+    porHora: boolean,
+  ): Promise<Array<{ timestamp: Date; totalValueUsd: number; assetBalances: SnapshotAssetBalance[] }>> {
+    const match = {
+      userId: new Types.ObjectId(userId),
+      timestamp: { $gte: since },
+      isPartial: { $ne: true },
+    };
+
+    if (!porHora) {
+      const docs = await this.hourlySnapshotModel
+        .find(match)
+        .select('timestamp totalValueUsd assetBalances')
+        .sort({ timestamp: 1 })
+        .lean();
+      return docs as any;
+    }
+
+    return this.hourlySnapshotModel.aggregate([
+      { $match: match },
+      { $sort: { timestamp: 1 } },
+      {
+        $group: {
+          _id: { $dateTrunc: { date: '$timestamp', unit: 'hour' } },
+          timestamp: { $last: '$timestamp' },
+          totalValueUsd: { $last: '$totalValueUsd' },
+          assetBalances: { $last: '$assetBalances' },
+        },
+      },
+      { $sort: { timestamp: 1 } },
+      { $project: { _id: 0, timestamp: 1, totalValueUsd: 1, assetBalances: 1 } },
+    ]);
+  }
+
   private async get7dChartData(userId: string): Promise<ChartDataResponseDto> {
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    // Get hourly snapshots
-    const snapshots = await this.hourlySnapshotModel
-      .find({
-        userId: new Types.ObjectId(userId),
-        timestamp: { $gte: since },
-        isPartial: { $ne: true },
-      })
-      .sort({ timestamp: 1 });
-
-    // Show all hourly data points for better granularity
-    const data = snapshots.map((s) => ({
-      timestamp: s.timestamp,
-      totalValueUsd: s.totalValueUsd,
-    }));
-
-    return this.buildChartResponse(data, '7d');
+    const porHora = await this.leerSnapshots(userId, since, true);
+    return this.buildChartResponse(porHora, '7d');
   }
 
   private async get1mChartData(userId: string): Promise<ChartDataResponseDto> {
