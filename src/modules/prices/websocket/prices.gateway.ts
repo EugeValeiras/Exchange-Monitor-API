@@ -15,6 +15,7 @@ import { ConnectionStatus, PriceAggregatorService } from './price-aggregator.ser
 import { AggregatedPrice } from './exchange-stream.interface';
 import { SettingsService } from '../../settings/settings.service';
 import { BinanceDepthStreamService, DepthUpdate } from './binance-depth-stream.service';
+import { BinanceKlineStreamService, KlineUpdate } from './binance-kline-stream.service';
 
 @WebSocketGateway({
   cors: {
@@ -35,6 +36,9 @@ export class PricesGateway
   private configuredByBase: Map<string, string[]> = new Map();
   private configuredToRequested: Map<string, Set<string>> = new Map();
 
+  /** Qué velas mira cada cliente, para soltarlas cuando se desconecta. */
+  private readonly klineViewers = new Map<string, Set<string>>();
+
   /** Qué libros mira cada cliente, para soltarlos cuando se desconecta. */
   private readonly orderbookViewers = new Map<string, Set<string>>();
   /** Última emisión por libro: Binance manda diez por segundo, se pasan cuatro. */
@@ -45,6 +49,7 @@ export class PricesGateway
   constructor(
     private readonly priceAggregator: PriceAggregatorService,
     private readonly depthStream: BinanceDepthStreamService,
+    private readonly klineStream: BinanceKlineStreamService,
     @Optional() @Inject(forwardRef(() => SettingsService))
     private readonly settingsService?: SettingsService,
   ) {
@@ -114,6 +119,7 @@ export class PricesGateway
     // servidor pasa por afterInit. Registrarlo antes dejaba el callback en una
     // instancia con `server` en null, y el relay reventaba.
     this.depthStream.onUpdate((book) => this.relayOrderbook(book));
+    this.klineStream.onUpdate((k) => this.relayKline(k));
   }
 
   handleConnection(client: Socket): void {
@@ -133,6 +139,76 @@ export class PricesGateway
       this.releaseOrderbook(client, key);
     }
     this.orderbookViewers.delete(client.id);
+
+    for (const key of this.klineViewers.get(client.id) ?? []) {
+      this.releaseKline(client, key);
+    }
+    this.klineViewers.delete(client.id);
+  }
+
+  // ==================== VELAS EN VIVO ====================
+
+  /**
+   * Un cliente mira un par en un intervalo. Sólo Binance emite velas; al resto
+   * se le avisa y sigue repidiendo por REST.
+   */
+  @SubscribeMessage('kline:subscribe')
+  handleKlineSubscribe(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { exchange?: string; symbol?: string; timeframe?: string },
+  ): void {
+    const exchange = (body?.exchange ?? '').toLowerCase();
+    const symbol = (body?.symbol ?? '').toUpperCase();
+    const timeframe = (body?.timeframe ?? '').toLowerCase();
+    if (!symbol || !timeframe) return;
+
+    if (exchange !== 'binance' || !this.klineStream.soporta(timeframe)) {
+      client.emit('kline:unsupported', { exchange, symbol, timeframe });
+      return;
+    }
+
+    const key = `${exchange}:${symbol}:${timeframe}`;
+    const mine = this.klineViewers.get(client.id) ?? new Set<string>();
+    if (mine.has(key)) return;
+    mine.add(key);
+    this.klineViewers.set(client.id, mine);
+
+    client.join(`kline:${key}`);
+    this.klineStream.subscribe(symbol, timeframe);
+    this.logger.log(`Client ${client.id} mira las velas de ${key}`);
+  }
+
+  @SubscribeMessage('kline:unsubscribe')
+  handleKlineUnsubscribe(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { exchange?: string; symbol?: string; timeframe?: string },
+  ): void {
+    const key = `${(body?.exchange ?? '').toLowerCase()}:${(body?.symbol ?? '').toUpperCase()}:${(body?.timeframe ?? '').toLowerCase()}`;
+    const mine = this.klineViewers.get(client.id);
+    if (!mine?.has(key)) return;
+    mine.delete(key);
+    this.releaseKline(client, key);
+  }
+
+  private releaseKline(client: Socket, key: string): void {
+    client.leave(`kline:${key}`);
+    const [exchange, symbol, timeframe] = key.split(':');
+    if (exchange === 'binance') this.klineStream.unsubscribe(symbol, timeframe);
+  }
+
+  /**
+   * Reenvía la vela a su sala. No hace falta estrangular: Binance manda un par
+   * por segundo por stream, no diez como la profundidad.
+   */
+  private relayKline(k: KlineUpdate): void {
+    try {
+      if (!this.server) return;
+      this.server
+        .to(`kline:${k.exchange}:${k.symbol.toUpperCase()}:${k.timeframe}`)
+        .emit('kline:update', k);
+    } catch (error) {
+      this.logger.error(`No pude reenviar la vela: ${(error as Error).message}`);
+    }
   }
 
   // ==================== LIBRO DE ÓRDENES EN VIVO ====================

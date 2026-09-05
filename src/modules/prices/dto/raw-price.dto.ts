@@ -96,3 +96,29 @@ export class RawOrderbookResponseDto {
   @ApiProperty({ enum: ['public', 'authenticated'], example: 'public' })
   source: RawSource;
 }
+
+export class OpenOrderDto {
+  @ApiProperty() id: string;
+  @ApiProperty() symbol: string;
+  @ApiProperty({ enum: ['buy', 'sell'] }) side: 'buy' | 'sell';
+  @ApiProperty({ description: 'limit, market, stop_loss_limit…' }) type: string;
+  @ApiProperty({ nullable: true, description: 'Precio de la orden; null en las de mercado' })
+  price: number | null;
+  @ApiProperty({ nullable: true, description: 'Precio de disparo de una condicional' })
+  triggerPrice: number | null;
+  @ApiProperty() amount: number;
+  @ApiProperty() filled: number;
+  @ApiProperty({ description: 'Lo que falta ejecutar' }) remaining: number;
+  @ApiProperty() status: string;
+  @ApiProperty({ nullable: true }) createdAt: Date | null;
+}
+
+export class OpenOrdersResponseDto {
+  @ApiProperty() exchange: string;
+  @ApiProperty({ nullable: true, description: 'null = todas las del exchange' })
+  symbol: string | null;
+  @ApiProperty({ description: 'false cuando el exchange no permite consultarlas' })
+  supported: boolean;
+  @ApiProperty({ type: [OpenOrderDto] }) orders: OpenOrderDto[];
+}
+

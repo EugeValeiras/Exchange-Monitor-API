@@ -24,6 +24,7 @@ import { SwapExecutionResultDto } from './dto/swap-execute.dto';
 import {
   RawOrderbookResponseDto,
   RawTickerResponseDto,
+  OpenOrdersResponseDto,
 } from './dto/raw-price.dto';
 import { PriceAggregatorService } from './websocket/price-aggregator.service';
 
@@ -1152,6 +1153,67 @@ export class PricesService {
     } catch (err) {
       throw new BadRequestException(
         `Failed to fetch order book ${normalized} on ${exchange}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Las órdenes que tenés puestas y todavía no se ejecutaron.
+   *
+   * Sale del exchange en vivo, con tu credencial: no hay nada guardado en la
+   * base sobre esto, y no debería haberlo — una orden abierta de hace cinco
+   * minutos puede estar ejecutada ahora.
+   *
+   * Sin `symbol` Binance cobra un peso alto de rate limit, así que se pide por
+   * par cuando se sabe cuál. Si el exchange no soporta la consulta, la
+   * respuesta lo dice en vez de fingir que no tenés órdenes.
+   */
+  async fetchOpenOrders(
+    exchange: ExchangeType,
+    opts: { symbol?: string; userId?: string } = {},
+  ): Promise<OpenOrdersResponseDto> {
+    const client = await this.getRawClient(exchange, {
+      userId: opts.userId,
+      asMe: true,
+    });
+
+    if (!client.has?.['fetchOpenOrders']) {
+      return {
+        exchange,
+        symbol: opts.symbol ?? null,
+        supported: false,
+        orders: [],
+      };
+    }
+
+    const symbol = opts.symbol ? this.normalizeRawSymbol(opts.symbol) : undefined;
+    try {
+      const raw = await client.fetchOpenOrders(symbol);
+      const orders = (raw ?? []).map((o: any) => ({
+        id: String(o.id ?? ''),
+        symbol: String(o.symbol ?? symbol ?? ''),
+        side: o.side === 'sell' ? 'sell' : 'buy',
+        type: String(o.type ?? ''),
+        price: o.price != null ? Number(o.price) : null,
+        // El disparo de una stop/limit condicional: sin esto una orden que
+        // espera a que el precio la toque no se puede ubicar en el gráfico.
+        triggerPrice:
+          o.triggerPrice != null
+            ? Number(o.triggerPrice)
+            : o.stopPrice != null
+              ? Number(o.stopPrice)
+              : null,
+        amount: Number(o.amount ?? 0),
+        filled: Number(o.filled ?? 0),
+        remaining: Number(o.remaining ?? Number(o.amount ?? 0) - Number(o.filled ?? 0)),
+        status: String(o.status ?? 'open'),
+        createdAt: o.timestamp ? new Date(o.timestamp) : null,
+      }));
+
+      return { exchange, symbol: symbol ?? null, supported: true, orders };
+    } catch (err) {
+      throw new BadRequestException(
+        `No pude leer las órdenes abiertas en ${exchange}: ${(err as Error).message}`,
       );
     }
   }

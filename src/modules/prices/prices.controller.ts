@@ -1,10 +1,11 @@
 import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
 import {
-  ApiTags,
-  ApiOperation,
-  ApiResponse,
   ApiBearerAuth,
+  ApiOperation,
+  ApiParam,
   ApiQuery,
+  ApiResponse,
+  ApiTags,
 } from '@nestjs/swagger';
 import { PricesService } from './prices.service';
 import { PriceResponseDto, ConvertResponseDto } from './dto/price-response.dto';
@@ -13,6 +14,7 @@ import { ExecuteSwapDto, SwapExecutionResultDto } from './dto/swap-execute.dto';
 import {
   RawOrderbookResponseDto,
   RawTickerResponseDto,
+  OpenOrdersResponseDto,
 } from './dto/raw-price.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -83,6 +85,26 @@ export class PricesController {
     @CurrentUser('userId') userId: string,
   ): Promise<ConvertResponseDto> {
     return this.pricesService.convert(from, to, Number(amount), userId);
+  }
+
+  @Get('raw/:exchange/open-orders')
+  @ApiOperation({
+    summary: 'Órdenes puestas y todavía sin ejecutar, leídas del exchange',
+  })
+  @ApiParam({ name: 'exchange', example: 'binance' })
+  @ApiQuery({
+    name: 'symbol',
+    required: false,
+    example: 'BTC/USDT',
+    description: 'Sin esto se piden todas, que en Binance pesa mucho más',
+  })
+  @ApiResponse({ status: 200, type: OpenOrdersResponseDto })
+  async getOpenOrders(
+    @Param('exchange') exchange: ExchangeType,
+    @Query('symbol') symbol: string | undefined,
+    @CurrentUser('userId') userId: string,
+  ): Promise<OpenOrdersResponseDto> {
+    return this.pricesService.fetchOpenOrders(exchange, { symbol, userId });
   }
 
   @Get('raw/:exchange/orderbook')
