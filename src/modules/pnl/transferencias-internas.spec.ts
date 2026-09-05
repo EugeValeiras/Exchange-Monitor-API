@@ -1,4 +1,8 @@
-import { emparejarTransferenciasInternas, MovimientoDeFondos } from './transferencias-internas';
+import {
+  emparejarConDetalle,
+  emparejarTransferenciasInternas,
+  MovimientoDeFondos,
+} from './transferencias-internas';
 
 const en = (min: number) => new Date(Date.UTC(2026, 0, 6, 18, 30 + min));
 
@@ -62,5 +66,38 @@ describe('emparejarTransferenciasInternas · la misma plata cambiando de lugar',
       mov('d1', 'deposit', 'kraken', 1, 20),
     ]);
     expect(internas).toEqual(new Set(['r1', 'd1']));
+  });
+});
+
+describe('emparejarConDetalle · con quién va cada punta', () => {
+  const en = (min: number) => new Date(Date.UTC(2026, 7, 24, 15, 48 + min));
+
+  it('dice qué retiro va con qué depósito, no sólo que son internos', () => {
+    // El caso de la captura: 0,579245 BTC salen de Nexo a las 15:48 y entran
+    // en Binance a las 16:48.
+    const pares = emparejarConDetalle([
+      { id: 'retiro', type: 'withdrawal', exchange: 'nexo-manual', amount: 0.579245, asset: 'BTC', timestamp: en(0) },
+      { id: 'deposito', type: 'deposit', exchange: 'binance', amount: 0.579245, asset: 'BTC', timestamp: en(60) },
+    ]);
+
+    expect(pares).toEqual([{ retiro: 'retiro', deposito: 'deposito' }]);
+  });
+
+  it('cada depósito se usa una sola vez', () => {
+    const pares = emparejarConDetalle([
+      { id: 'r1', type: 'withdrawal', exchange: 'binance', amount: 1, asset: 'BTC', timestamp: en(0) },
+      { id: 'r2', type: 'withdrawal', exchange: 'binance', amount: 1, asset: 'BTC', timestamp: en(5) },
+      { id: 'd1', type: 'deposit', exchange: 'kraken', amount: 1, asset: 'BTC', timestamp: en(20) },
+    ]);
+
+    expect(pares).toHaveLength(1);
+    expect(pares[0].retiro).toBe('r1');
+  });
+
+  it('un retiro a una billetera de afuera no arma par', () => {
+    const pares = emparejarConDetalle([
+      { id: 'r', type: 'withdrawal', exchange: 'nexo-manual', amount: 33250.7, asset: 'NEXO', timestamp: en(0) },
+    ]);
+    expect(pares).toEqual([]);
   });
 });

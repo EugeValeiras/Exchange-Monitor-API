@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { TransactionType } from '../../../common/constants/transaction-types.constant';
 
 export class TransactionResponseDto {
@@ -50,6 +50,13 @@ export class TransactionResponseDto {
 
   @ApiProperty()
   timestamp: Date;
+
+  @ApiPropertyOptional({
+    description:
+      'Las dos puntas de un traspaso entre exchanges propios comparten este ' +
+      'id: sacar de uno y recibir en otro no son dos hechos, es el mismo.',
+  })
+  transferGroupId?: string;
 }
 
 export class PaginatedTransactionsDto {

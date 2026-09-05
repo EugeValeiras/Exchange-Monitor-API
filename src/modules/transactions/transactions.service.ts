@@ -10,6 +10,7 @@ import { PnlService } from '../pnl/pnl.service';
 import { SettingsService } from '../settings/settings.service';
 import { ExchangeType } from '../../common/constants/exchanges.constant';
 import { TransactionType } from '../../common/constants/transaction-types.constant';
+import { emparejarConDetalle } from '../pnl/transferencias-internas';
 import { TransactionFilterDto } from './dto/transaction-filter.dto';
 import {
   PaginatedTransactionsDto,
@@ -114,6 +115,8 @@ export class TransactionsService {
       this.transactionModel.countDocuments(query),
     ]);
 
+    const traspasos = await this.mapaDeTraspasos(userId);
+
     return {
       data: transactions.map((t) => ({
         id: t._id.toString(),
@@ -129,12 +132,59 @@ export class TransactionsService {
         pair: t.pair,
         side: t.side,
         timestamp: t.timestamp,
+        transferGroupId: traspasos.get(t._id.toString()),
       })),
       total,
       page: filter.page,
       limit: filter.limit,
       totalPages: Math.ceil(total / filter.limit),
     };
+  }
+
+  /**
+   * Qué movimientos son en realidad un traspaso entre tus propios exchanges.
+   *
+   * Devuelve id → identificador del par, para que las dos puntas se puedan
+   * juntar en una sola fila. Sacar 0,579 BTC de Nexo y recibirlos en Binance
+   * una hora después no son dos hechos: es el mismo, contado dos veces.
+   *
+   * Se emparejan TODOS los movimientos del usuario, no los de la página: un
+   * retiro al final de una página y su depósito en la siguiente tienen que
+   * juntarse igual. Son pocos —un centenar en toda la historia— así que el
+   * costo es leer dos campos de cien documentos.
+   *
+   * Es el mismo criterio que usa la contabilidad de lotes para no realizar una
+   * ganancia que no existió; que las dos cosas coincidan no es casualidad,
+   * es la misma pregunta.
+   */
+  private async mapaDeTraspasos(userId: string): Promise<Map<string, string>> {
+    const movimientos = await this.transactionModel
+      .find({
+        userId: new Types.ObjectId(userId),
+        type: { $in: [TransactionType.DEPOSIT, TransactionType.WITHDRAWAL] },
+      })
+      .select('asset exchange type amount timestamp')
+      .sort({ timestamp: 1 })
+      .lean();
+
+    const pares = emparejarConDetalle(
+      movimientos.map((m) => ({
+        id: m._id.toString(),
+        asset: m.asset,
+        exchange: m.exchange,
+        type: m.type as 'deposit' | 'withdrawal',
+        amount: m.amount,
+        timestamp: m.timestamp,
+      })),
+    );
+
+    const mapa = new Map<string, string>();
+    for (const par of pares) {
+      // El id del retiro nombra al par: es la punta que ocurrió primero.
+      mapa.set(par.retiro, par.retiro);
+      mapa.set(par.deposito, par.retiro);
+    }
+    return mapa;
   }
 
   /**
